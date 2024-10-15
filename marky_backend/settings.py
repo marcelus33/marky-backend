@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'drf_spectacular',
+    'users',
 ]
 
 MIDDLEWARE = [
@@ -66,6 +67,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django.middleware.locale.LocaleMiddleware',
 ]
 
 ROOT_URLCONF = 'marky_backend.urls'
@@ -127,7 +129,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.1/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'es-es'
 
 TIME_ZONE = 'UTC'
 
@@ -147,15 +149,15 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Custom user model
-# AUTH_USER_MODEL = "users.User"
+AUTH_USER_MODEL = "users.User"
 #
 EMAIL_BACKEND = 'post_office.EmailBackend'
-# EMAIL_HOST = env.str("EMAIL_HOST", "smtp.sendgrid.net")
-# EMAIL_HOST_USER = env.str("SENDGRID_USERNAME", "")
-# EMAIL_HOST_PASSWORD = env.str("SENDGRID_PASSWORD", "")
-# DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", "")
-# EMAIL_PORT = 587
-# EMAIL_USE_TLS = True
+EMAIL_HOST = env.str("EMAIL_HOST", "")
+EMAIL_HOST_USER = env.str("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = env.str("EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", "")
+EMAIL_PORT = env.str("EMAIL_PORT", 465)
+EMAIL_USE_TLS = True
 
 CORS_ALLOW_ALL = DEBUG
 CORS_ALLOW_ALL_ORIGINS = DEBUG
@@ -235,10 +237,10 @@ LOGGING = {
             'class': 'logging.StreamHandler',
         },
     },
-    'loggers': {
-        'django.db.backends': {
-            'level': env.bool('LOGGING_DB_LEVEL', default='DEBUG'),
-            'handlers': ['console'],
-        },
-    },
+    # 'loggers': {
+    #     'django.db.backends': {
+    #         'level': env.bool('LOGGING_DB_LEVEL', default='DEBUG'),
+    #         'handlers': ['console'],
+    #     },
+    # },
 }
