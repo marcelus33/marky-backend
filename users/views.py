@@ -3,20 +3,29 @@ import string
 from datetime import timedelta
 
 from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.models import Group
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
-from marky_backend import settings
+from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema
 from post_office import mail
 from rest_framework import generics
 from rest_framework import status
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken, UntypedToken
+from rest_framework_simplejwt.views import (
+    TokenRefreshView, )
+
+from marky_backend import settings
 from users.serializers import UserRegisterSerializer, UserLoginSerializer, VerifyEmailSerializer, \
-    PasswordRecoverySerializer, PasswordChangeSerializer
+    PasswordRecoverySerializer, PasswordChangeSerializer, ResendVerificationSerializer, UserSerializer
 
 User = get_user_model()
 
 
+@extend_schema(tags=['Auth'])
 class RegisterView(generics.CreateAPIView):
     serializer_class = UserRegisterSerializer
     permission_classes = [AllowAny]
@@ -25,34 +34,50 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
 
-        # Generate a 6-digit verification code
-        verification_code = ''.join(random.choices(string.digits, k=6))
+        try:
+            with transaction.atomic():
+                user = serializer.save()
 
-        # Generate a token with an expiration time of 15 minutes
-        refresh = RefreshToken.for_user(user)
-        access_token = refresh.access_token
-        access_token.set_exp(lifetime=timedelta(minutes=15))
-        access_token['verification_code'] = verification_code
+                business_group = Group.objects.filter(name='business').first()
+                if business_group:
+                    business_group.user_set.add(user)
 
-        # TODO: change hardcoded url
-        verification_link = f"http://localhost:3000/verify-email/{str(access_token)}"
+                verification_code = ''.join(random.choices(string.digits, k=6))
 
-        mail.send(
-            user.email,
-            settings.DEFAULT_FROM_EMAIL,
-            template='verify_email',
-            context={'verification_link': verification_link, 'verification_code': verification_code},
-            # priority='now',
-        )
+                refresh = RefreshToken.for_user(user)
+                access_token = refresh.access_token
+                access_token.set_exp(lifetime=timedelta(minutes=15))
+                access_token['verification_code'] = verification_code
+                access_token_str = str(access_token)
+                # TODO change hardcoded link
+                verification_link = f"http://localhost:3000/verify-email/{access_token_str}"
+
+                mail.send(
+                    user.email,
+                    settings.DEFAULT_FROM_EMAIL,
+                    template='verify_email',
+                    context={
+                        'verification_link': verification_link,
+                        'verification_code': verification_code
+                    },
+                )
+        except Exception as e:
+            return Response(
+                {"error": f"{str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
         return Response(
-            {"message": "User registered successfully. A verification email has been sent."},
+            {"message": "Cuenta creada con éxito. Se ha enviado una verificación a su email.",
+             "user": UserSerializer(user).data,
+             "verification_link": access_token_str,
+             },
             status=status.HTTP_201_CREATED
         )
 
 
+@extend_schema(tags=['Auth'])
 class LoginView(generics.GenericAPIView):
     serializer_class = UserLoginSerializer
     permission_classes = [AllowAny]
@@ -65,15 +90,26 @@ class LoginView(generics.GenericAPIView):
         password = serializer.validated_data['password']
         user = authenticate(username=username, password=password)
 
-        if user is not None:
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            })
-        return Response({"error": "Invalid credentials"}, status=400)
+        if user is None:
+            raise AuthenticationFailed(_("Invalid credentials"))
+
+        if not user.is_verified:
+            raise AuthenticationFailed(_("User not verified"))
+
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'user': UserSerializer(user).data
+        })
 
 
+@extend_schema(tags=['Auth'])
+class CustomTokenRefreshView(TokenRefreshView):
+    pass
+
+
+@extend_schema(tags=['Auth'])
 class VerifyEmailView(generics.GenericAPIView):
     serializer_class = VerifyEmailSerializer
 
@@ -102,16 +138,69 @@ class VerifyEmailView(generics.GenericAPIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+@extend_schema(tags=['Auth'])
+class ResendVerificationView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = ResendVerificationSerializer
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        try:
+            user = User.objects.get(email=email)
+        except ObjectDoesNotExist:
+            return Response(
+                {"message": "Se ha enviado un nuevo correo de verificación."},
+                status=status.HTTP_200_OK
+            )
+
+        if user.is_verified:
+            return Response(
+                {"detail": "Este usuario ya se encuentra verificado."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Generar un nuevo código de verificación
+        verification_code = ''.join(random.choices(string.digits, k=6))
+
+        # Generar un nuevo token con 15 minutos de vigencia
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
+        access_token.set_exp(lifetime=timedelta(minutes=15))
+        access_token['verification_code'] = verification_code
+
+        # TODO: change hardcoded link
+        verification_link = f"http://localhost:3000/verify-email/{str(access_token)}"
+
+        mail.send(
+            user.email,
+            settings.DEFAULT_FROM_EMAIL,
+            template='verify_email',
+            context={'verification_link': verification_link, 'verification_code': verification_code},
+            # priority='now',
+        )
+
+        return Response(
+            {"message": "Se ha enviado un nuevo correo de verificación."},
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=['Auth'])
 class PasswordRecoveryView(generics.GenericAPIView):
     serializer_class = PasswordRecoverySerializer
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        if serializer.is_valid():
+            serializer.save()
         return Response({"message": "Se ha enviado un correo de recuperación."}, status=status.HTTP_200_OK)
 
 
+@extend_schema(tags=['Auth'])
 class PasswordChangeView(generics.GenericAPIView):
     serializer_class = PasswordChangeSerializer
 

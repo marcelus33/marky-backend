@@ -14,7 +14,6 @@ from pathlib import Path
 import environ
 import os
 
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -22,7 +21,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env_file = os.path.join(BASE_DIR, ".env")
 env = environ.Env()
 env.read_env(env_file)
-
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -55,19 +53,21 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'drf_spectacular',
+    'cities_light',
     'users',
+    'business',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django.middleware.locale.LocaleMiddleware',
+    'django.middleware.common.CommonMiddleware',
 ]
 
 ROOT_URLCONF = 'marky_backend.urls'
@@ -90,7 +90,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'marky_backend.wsgi.application'
 
-
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
@@ -105,7 +104,6 @@ if env.str("DATABASE_URL", default=None):
     DATABASES = {
         'default': env.db(engine='django.db.backends.postgresql_psycopg2')
     }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -125,18 +123,18 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # Internationalization
 # https://docs.djangoproject.com/en/5.1/topics/i18n/
 
-LANGUAGE_CODE = 'es-es'
-
-TIME_ZONE = 'UTC'
-
+LANGUAGE_CODE = 'es'
+TIME_ZONE = 'America/Asuncion'
 USE_I18N = True
-
+USE_L10N = True
 USE_TZ = True
 
+LOCALE_PATHS = [
+    os.path.join(BASE_DIR, 'locale')
+]
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
@@ -173,8 +171,8 @@ CORS_EXPOSE_HEADERS = [
 ]
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=8),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=8),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': False,
@@ -226,6 +224,12 @@ SPECTACULAR_SETTINGS = {
     "TITLE": "Marky API",
     "DESCRIPTION": "API documentation for Marky",
     "VERSION": "v1",
+    'TAGS': [
+        {'name': 'Auth', 'description': 'All API endpoints related to authentication.'},
+        {'name': 'Business', 'description': 'All API endpoints related to business.'},
+        {'name': 'Cities', 'description': 'All API endpoints related to cities & countries.'},
+        # Add more tags as needed
+    ],
 }
 
 LOGGING = {
@@ -244,3 +248,12 @@ LOGGING = {
     #     },
     # },
 }
+
+CITIES_LIGHT_DATA_DIR = os.path.join(BASE_DIR, 'cities')
+CITIES_LIGHT_TRANSLATION_LANGUAGES = ['es']
+CITIES_LIGHT_INCLUDE_COUNTRIES = ['PY', 'VE']
+
+try:
+    from marky_backend.local_settings import *
+except ImportError:
+    pass

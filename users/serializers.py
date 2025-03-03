@@ -11,12 +11,37 @@ User = get_user_model()
 class UserRegisterSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['username', 'email', 'password', 'business_name', 'phone_number']
+        fields = ['email', 'password', 'business_name', 'phone_number']
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Este correo ya está registrado.")
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop("password", None)
+
+        email = validated_data.get("email")
+        validated_data["username"] = email
+
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        user.save()
+
+        return user
 
 
 class UserLoginSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField()
+
+
+class UserSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = User
+        fields = ['id', 'business_name', 'email', 'phone_number', 'has_configuration']
 
 
 class VerifyEmailSerializer(serializers.Serializer):
@@ -30,12 +55,16 @@ class VerifyEmailSerializer(serializers.Serializer):
         return value
 
 
+class ResendVerificationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
 class PasswordRecoverySerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def save(self):
         email = self.validated_data['email']
-        user = User.objects.get(email=email)
+        user = User.objects.filter(email=email).first()
         if not user:
             return
         # Generate a token

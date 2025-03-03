@@ -16,3 +16,7 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.business_name
+
+    @property
+    def has_configuration(self):
+        return hasattr(self, 'business_profile') and self.business_profile is not None
