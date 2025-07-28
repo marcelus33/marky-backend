@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'cities_light',
     'users',
     'business',
+    'products',
 ]
 
 MIDDLEWARE = [
@@ -102,7 +103,8 @@ DATABASES = {
 
 if env.str("DATABASE_URL", default=None):
     DATABASES = {
-        'default': env.db(engine='django.db.backends.postgresql_psycopg2')
+        # 'default': env.db(engine='django.db.backends.postgresql_psycopg2')
+        'default': env.db(engine='django.contrib.gis.db.backends.postgis')
     }
 
 # Password validation
@@ -228,6 +230,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Auth', 'description': 'All API endpoints related to authentication.'},
         {'name': 'Business', 'description': 'All API endpoints related to business.'},
         {'name': 'Cities', 'description': 'All API endpoints related to cities & countries.'},
+        {'name': 'Products', 'description': 'All API endpoints related to products.'},
         # Add more tags as needed
     ],
 }

@@ -1,5 +1,7 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from business.models import BusinessCategory, Currency, BusinessProfile
+from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
+from .validators import validate_image_size, validate_image_extension
 from cities_light.models import City, Country
 from django.contrib.auth import get_user_model
 
@@ -58,3 +60,173 @@ class CountrySerializer(serializers.ModelSerializer):
     class Meta:
         model = Country
         fields = ['id', 'name']
+
+
+class SocialMediaLinkSerializer(serializers.ModelSerializer):
+    platform_display = serializers.CharField(source='get_platform_display', read_only=True)
+    
+    class Meta:
+        model = SocialMediaLink
+        fields = ['id', 'platform', 'platform_display', 'url']
+        
+    def create(self, validated_data):
+        # Get the business from the context (will be set in the view)
+        business = self.context['business']
+        validated_data['business'] = business
+        return super().create(validated_data)
+        
+    def update(self, instance, validated_data):
+        # Ensure business cannot be changed during update
+        validated_data.pop('business', None)
+        return super().update(instance, validated_data)
+
+
+class SocialMediaLinkBulkUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for bulk updating social media links.
+    Accepts platform names as field names with URLs as values.
+    """
+    facebook = serializers.URLField(required=False, allow_blank=False, help_text="Facebook page URL")
+    instagram = serializers.URLField(required=False, allow_blank=False, help_text="Instagram profile URL")
+    whatsapp = serializers.CharField(required=False, allow_blank=False, help_text="WhatsApp number or URL")
+    website = serializers.URLField(required=False, allow_blank=False, help_text="Website URL")
+    
+    def validate(self, data):
+        """
+        Validate that at least one platform is provided and all URLs are valid.
+        """
+        if not data:
+            raise serializers.ValidationError("At least one social media platform must be provided.")
+        
+        # Validate WhatsApp format (can be phone number or URL)
+        if 'whatsapp' in data:
+            whatsapp_value = data['whatsapp']
+            # Allow phone numbers or WhatsApp URLs
+            if not (whatsapp_value.startswith('http') or whatsapp_value.replace('+', '').replace(' ', '').isdigit()):
+                raise serializers.ValidationError({
+                    'whatsapp': 'WhatsApp must be a valid phone number or URL.'
+                })
+        
+        return data
+
+
+class SocialMediaLinkBulkUpdateResponseSerializer(serializers.Serializer):
+    """
+    Serializer for the bulk update response.
+    """
+    social_links = SocialMediaLinkSerializer(many=True, read_only=True)
+    created = serializers.IntegerField(read_only=True, help_text="Number of links created")
+    updated = serializers.IntegerField(read_only=True, help_text="Number of links updated")
+    removed = serializers.IntegerField(read_only=True, help_text="Number of links removed")
+    removed_platforms = serializers.ListField(
+        child=serializers.CharField(),
+        read_only=True,
+        help_text="List of platforms that were removed"
+    )
+
+
+class BranchAttributeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BranchAttribute
+        fields = ['id', 'name']
+
+
+class BusinessProfileHomePageSerializer(serializers.ModelSerializer):
+    """
+    Serializer for business profile home page data.
+    Returns all necessary information for the frontend home page.
+    """
+    business_name = serializers.CharField(source='user.business_name', read_only=True)
+    social_links = SocialMediaLinkSerializer(many=True, read_only=True)
+    categories = BusinessCategorySerializer(many=True, read_only=True)
+    headquarter_attributes = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = BusinessProfile
+        fields = [
+            'business_name',
+            'social_links', 
+            'description',
+            'categories',
+            'profile_image',
+            'headquarter_attributes'
+        ]
+    
+    def get_headquarter_attributes(self, obj):
+        """
+        Get attributes from the headquarter branch (is_headquarter=True).
+        """
+        try:
+            headquarter_branch = obj.branches.filter(is_headquarter=True).first()
+            if headquarter_branch:
+                return BranchAttributeSerializer(headquarter_branch.attributes.all(), many=True).data
+            return []
+        except Exception:
+            return []
+
+
+class BusinessProfileUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for updating business profile description and/or headquarter attributes.
+    At least one field must be provided.
+    """
+    description = serializers.CharField(
+        required=False, 
+        allow_blank=True, 
+        help_text="Business profile description"
+    )
+    headquarter_attributes = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True,
+        help_text="List of attribute IDs for the headquarter branch"
+    )
+    
+    def validate(self, data):
+        """
+        Validate that at least one field is provided.
+        """
+        if not data.get('description') and 'headquarter_attributes' not in data:
+            raise serializers.ValidationError(
+                "At least one field must be provided: 'description' or 'headquarter_attributes'"
+            )
+        
+        # Validate that all attribute IDs exist
+        if 'headquarter_attributes' in data:
+            attribute_ids = data['headquarter_attributes']
+            if attribute_ids:  # Only validate if not empty
+                existing_ids = set(BranchAttribute.objects.filter(
+                    id__in=attribute_ids
+                ).values_list('id', flat=True))
+                invalid_ids = set(attribute_ids) - existing_ids
+                if invalid_ids:
+                    raise serializers.ValidationError({
+                        'headquarter_attributes': f'Invalid attribute IDs: {list(invalid_ids)}'
+                    })
+        
+        return data
+
+
+class BusinessProfileUpdateResponseSerializer(serializers.Serializer):
+    """
+    Serializer for the business profile update response.
+    """
+    message = serializers.CharField(read_only=True, help_text="Success message")
+    updated_fields = serializers.ListField(
+        child=serializers.CharField(),
+        read_only=True,
+        help_text="List of fields that were updated"
+    )
+    business_profile = BusinessProfileHomePageSerializer(read_only=True, help_text="Updated business profile data")
+
+
+class BusinessProfileImageSerializer(serializers.ModelSerializer):
+    profile_image_display = serializers.ImageField(source='profile_image', read_only=True)
+    profile_image = serializers.ImageField(
+        validators=[validate_image_size, validate_image_extension],
+        write_only=True
+    )
+
+    class Meta:
+        model = BusinessProfile
+        fields = ['profile_image', 'profile_image_display']

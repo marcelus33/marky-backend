@@ -1,8 +1,20 @@
+import os
+
 from django.db import models
 from django.contrib.auth import get_user_model
 from cities_light.models import City
+from django.contrib.gis.db import models as gis_models
 
 User = get_user_model()
+
+
+def business_profile_image_path(instance, filename):
+    return os.path.join(
+        'business_profiles',
+        f'business-{instance.pk}',
+        'profile_img',
+        filename
+    )
 
 
 class BusinessCategory(models.Model):
@@ -58,9 +70,102 @@ class BusinessProfile(models.Model):
     management_methods = models.JSONField(blank=True, null=True)  # medios_gestion_cuenta
     display_methods = models.JSONField(blank=True, null=True)  # medios_mostrar_cuenta
 
+    profile_image = models.ImageField(
+        upload_to=business_profile_image_path,
+        null=True,
+        blank=True,
+        default='business_profiles/default.png',
+        verbose_name='Imagen de perfil'
+    )
+    description = models.TextField(blank=True, null=True)
+
     class Meta:
         verbose_name = 'Business Profile'
         verbose_name_plural = 'Business Profiles'
 
     def __str__(self):
         return f"{self.business_id} - {self.user}"
+
+
+class SocialMediaLink(models.Model):
+    """
+    Social media links for the Business profiles.
+    """
+    PLATFORM_CHOICES = [
+        ('facebook', 'Facebook'),
+        ('instagram', 'Instagram'),
+        ('whatsapp', 'Whatsapp'),
+        ('website', 'Sitio Web'),
+    ]
+
+    business = models.ForeignKey(
+        BusinessProfile,
+        related_name='social_links',
+        on_delete=models.CASCADE
+    )
+    platform = models.CharField(
+        max_length=20,
+        choices=PLATFORM_CHOICES
+    )
+    url = models.CharField(max_length=255,)
+
+    class Meta:
+        unique_together = ('business', 'platform')
+
+    def __str__(self):
+        return f"{self.business.business_id} – {self.get_platform_display()}"
+
+
+class BranchAttribute(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Atributo de Sucursal"
+        verbose_name_plural = "Atributos de Sucursal"
+
+
+class BranchBenefit(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Beneficio de Sucursal"
+        verbose_name_plural = "Beneficios de Sucursal"
+
+
+class Branch(models.Model):
+    """
+    Model to handle Business Branches (Sucursales)
+    """
+    business = models.ForeignKey(BusinessProfile, related_name='branches', on_delete=models.CASCADE)
+    name = models.CharField(max_length=100)
+    address = models.CharField(max_length=255)
+
+    # en lugar de latitude + longitude:
+    location = gis_models.PointField(
+        srid=4326,         # Sistema WGS84
+        geography=True,    # para distancias reales en metros
+        null=True,
+        blank=True
+    )
+
+    schedule = models.JSONField(default=dict, blank=True)
+    attributes = models.ManyToManyField(BranchAttribute, blank=True, related_name='branches')
+    benefits = models.ManyToManyField(BranchBenefit,  blank=True, related_name='branches')
+
+    is_headquarter = models.BooleanField(
+        default=False,
+        verbose_name="Casa Matriz",
+        help_text="Marca si esta sucursal es la casa matriz"
+    )
+
+    class Meta:
+        ordering = ['business', 'name']
+
+    def __str__(self):
+        return f"{self.business.business_id} – {self.name}"
