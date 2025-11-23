@@ -42,7 +42,8 @@ class Product(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE, related_name='products')
+    category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE,
+                                 related_name='products', null=True, blank=True)
     is_active = models.BooleanField(default=True)
     stopper = models.CharField(
         max_length=20,
@@ -104,6 +105,10 @@ class ProductMedia(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='media')
     file = models.FileField(upload_to='product_media/')
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default=IMAGE)
+    order = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return f'{self.product.name} - {self.media_type}'
+
+    class Meta:
+        ordering = ['media_type', 'order']

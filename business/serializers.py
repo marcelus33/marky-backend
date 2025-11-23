@@ -140,7 +140,8 @@ class BusinessProfileHomePageSerializer(serializers.ModelSerializer):
     social_links = SocialMediaLinkSerializer(many=True, read_only=True)
     categories = BusinessCategorySerializer(many=True, read_only=True)
     headquarter_attributes = serializers.SerializerMethodField()
-    
+    profile_image = serializers.SerializerMethodField()
+
     class Meta:
         model = BusinessProfile
         fields = [
@@ -163,6 +164,15 @@ class BusinessProfileHomePageSerializer(serializers.ModelSerializer):
             return []
         except Exception:
             return []
+
+    def get_profile_image(self, obj):
+        request = self.context.get('request')
+        profile_image = obj.profile_image
+        if profile_image and request:
+            return request.build_absolute_uri(profile_image.url)
+        elif profile_image:
+            return profile_image.url
+        return None
 
 
 class BusinessProfileUpdateSerializer(serializers.Serializer):

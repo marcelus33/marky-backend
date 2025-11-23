@@ -11,11 +11,13 @@ django-post-office==3.9.0
 django-simple-history==3.7.0
 djangorestframework==3.15.2
 djangorestframework-simplejwt==5.3.1
+drf-nested-forms==1.1.8
 drf-spectacular==0.27.2
 inflection==0.5.1
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
 Markdown==3.7
+pillow==11.2.1
 progressbar2==4.5.0
 psycopg2-binary==2.9.9
 PyJWT==2.9.0

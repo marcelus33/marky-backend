@@ -1,27 +1,76 @@
 from django.db import transaction, models
-from drf_spectacular.utils import extend_schema
+from django_filters import rest_framework as filters
+from drf_spectacular.utils import extend_schema, OpenApiParameter, extend_schema_view
+from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+import json
+from rest_framework.parsers import MultiPartParser, FormParser
+from drf_nested_forms.parsers import NestedMultiPartParser
 from rest_framework.response import Response
-from .models import ProductCategory
+from rest_framework import serializers
+from .filters import ProductCategoryFilter
+from .models import ProductCategory, ProductVariant, ProductAddon
+from .models import Product
 from .serializers import (
     ProductCategoryBasicSerializer,
     ProductCategoryWithProductsSerializer,
+    ProductSerializer,
+    ProductInputSerializer,
     PromotionSerializer,
-    ProductCategoryOrderUpdateSerializer
+    ProductCategoryOrderUpdateSerializer,
+    ProductLiteSerializer
 )
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(name='name', description='Filter by category name (case-insensitive)', required=False, type=OpenApiTypes.STR),
+        ]
+    ),
+    with_products=extend_schema(
+        parameters=[
+            OpenApiParameter(name='name', description='Filter by category name (case-insensitive)', required=False, type=OpenApiTypes.STR),
+            OpenApiParameter(name='ids', description='Filter by a comma-separated list of category IDs', required=False, type=OpenApiTypes.STR),
+            OpenApiParameter(name='has_promotion', description='Filter for categories with active promotions', required=False, type=OpenApiTypes.BOOL),
+        ]
+    )
+)
 @extend_schema(tags=['Products'])
 class ProductCategoryViewSet(viewsets.ModelViewSet):
     serializer_class = ProductCategoryBasicSerializer
     queryset = ProductCategory.objects.all()
 
-    def get_queryset(self):
+    def get_base_queryset(self):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
             return ProductCategory.objects.filter(business=user.business_profile)
         return ProductCategory.objects.none()
+
+    def get_queryset(self):
+        queryset = self.get_base_queryset()
+
+        if self.action == 'list':
+            name = self.request.query_params.get('name')
+            if name:
+                queryset = queryset.filter(name__icontains=name)
+
+        return queryset
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='name',
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Filter categories by name (case-insensitive partial match)'
+            )
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         business = self.request.user.business_profile
@@ -55,13 +104,82 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @extend_schema(
+        responses=ProductCategoryWithProductsSerializer(many=True),
+        # Swagger will infer parameters from ProductCategoryFilter
+    )
     @action(detail=False, methods=['get'], serializer_class=ProductCategoryWithProductsSerializer)
     def with_products(self, request):
-        queryset = self.get_queryset()
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+        base_qs = self.get_base_queryset()
+        filtered_qs = ProductCategoryFilter(request.GET, queryset=base_qs).qs
 
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+        products_count = filtered_qs.aggregate(total_products=models.Count('products'))['total_products']
+
+        page = self.paginate_queryset(filtered_qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            serialized_data = serializer.data
+            
+            # Now, handle products without a category
+            products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
+            if products_without_category.exists():
+                uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
+                no_category_data = {
+                    'id': None,
+                    'name': 'Sin categoría',
+                    'icon': 'fa-question-circle',
+                    'multibuy_option': None,
+                    'discount_percentage': 0,
+                    'promotion_starts_at': None,
+                    'promotion_ends_at': None,
+                    'products': uncategorized_products_serializer.data
+                }
+                serialized_data.append(no_category_data)
+
+            paginated_response = self.get_paginated_response(serialized_data)
+            paginated_response.data['products_count'] = products_count
+            return paginated_response
+
+        serializer = self.get_serializer(filtered_qs, many=True, context={'request': request})
+        serialized_data = serializer.data
+
+        # Also handle for non-paginated response
+        products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
+        if products_without_category.exists():
+            uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
+            no_category_data = {
+                'id': None,
+                'name': 'Sin categoría',
+                'icon': 'fa-question-circle',
+                'multibuy_option': None,
+                'discount_percentage': 0,
+                'promotion_starts_at': None,
+                'promotion_ends_at': None,
+                'products': uncategorized_products_serializer.data
+            }
+            serialized_data.append(no_category_data)
+
+        return Response({
+            'products_count': products_count,
+            'results': serialized_data
+        })
+
+
+@extend_schema(tags=['Products'])
+class ProductViewSet(viewsets.ModelViewSet):
+    queryset = Product.objects.all()
+    parser_classes = (NestedMultiPartParser, FormParser)
+
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return ProductInputSerializer
+        return ProductSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_authenticated and hasattr(user, 'business_profile'):
+            return Product.objects.filter(business=user.business_profile)
+        return Product.objects.none()
+
+    def perform_create(self, serializer):
+        serializer.save(business=self.request.user.business_profile)

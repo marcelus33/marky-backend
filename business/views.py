@@ -333,8 +333,9 @@ class BusinessProfileHomePageView(APIView):
             'categories',
             'branches__attributes'
         ).get(id=business_profile.id)
-        
-        serializer = BusinessProfileHomePageSerializer(business_profile)
+
+        context = {"request": request}
+        serializer = BusinessProfileHomePageSerializer(business_profile, context=context)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
