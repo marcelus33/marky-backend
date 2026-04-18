@@ -17,6 +17,7 @@ from business.serializers import BusinessCategorySerializer, CurrencySerializer,
     BusinessProfileImageSerializer
 from utils.permissions import IsBusinessOrSuperAdmin
 from .models import BusinessProfile
+from business.serializers import AccountInfoSerializer
 
 
 @extend_schema(tags=['Business'])
@@ -522,3 +523,87 @@ class BusinessProfileImageView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    tags=['Business'],
+    summary='Get current business account info',
+    description='Devuelve datos de configuración de cuenta del usuario autenticado (business).',
+    responses={200: AccountInfoSerializer},
+)
+class AccountInfoView(APIView):
+    permission_classes = [IsBusinessOrSuperAdmin]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+
+        # Base response with user fields
+        data = {
+            'business_name': getattr(user, 'business_name', None),
+            'email': getattr(user, 'email', None),
+            'phone_number': getattr(user, 'phone_number', None),
+
+            'business_id': None,
+            'business_type': None,
+            'exchange_rate': None,
+
+            'city_id': None,
+            'city_name': None,
+            'country_id': None,
+            'country_name': None,
+
+            'primary_currency_id': None,
+            'primary_currency_name': None,
+            'primary_currency_code': None,
+
+            'secondary_currency_id': None,
+            'secondary_currency_name': None,
+            'secondary_currency_code': None,
+
+            'categories': [],
+        }
+
+        try:
+            bp = (
+                BusinessProfile.objects
+                .select_related('city__country', 'primary_currency', 'secondary_currency')
+                .prefetch_related('categories')
+                .get(user=user)
+            )
+        except BusinessProfile.DoesNotExist:
+            bp = None
+
+        if bp is not None:
+            data.update({
+                'business_id': bp.business_id,
+                'business_type': bp.business_type,
+                'exchange_rate': bp.exchange_rate,
+            })
+
+            if bp.city is not None:
+                data.update({
+                    'city_id': bp.city.id,
+                    'city_name': bp.city.name,
+                    'country_id': bp.city.country.id if bp.city.country else None,
+                    'country_name': bp.city.country.name if bp.city.country else None,
+                })
+
+            if bp.primary_currency is not None:
+                data.update({
+                    'primary_currency_id': bp.primary_currency.id,
+                    'primary_currency_name': bp.primary_currency.name,
+                    'primary_currency_code': bp.primary_currency.code,
+                })
+
+            if bp.secondary_currency is not None:
+                data.update({
+                    'secondary_currency_id': bp.secondary_currency.id,
+                    'secondary_currency_name': bp.secondary_currency.name,
+                    'secondary_currency_code': bp.secondary_currency.code,
+                })
+
+            # categories: use serializer to get {id, name} list
+            data['categories'] = list(bp.categories.all())
+
+        serializer = AccountInfoSerializer(data)
+        return Response(serializer.data, status=status.HTTP_200_OK)

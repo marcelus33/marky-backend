@@ -2,6 +2,7 @@ from django.urls import path, include
 from business.views import BusinessCategoryListView, CurrencyListView, CityListView, CountryListView, \
     BusinessProfileViewSet, ValidateBusinessNameView, SocialMediaLinkViewSet, SocialMediaLinkBulkUpdateView, \
     BusinessProfileHomePageView, BusinessProfileUpdateView, BranchAttributeListView, BusinessProfileImageView
+from business.views import AccountInfoView
 from rest_framework.routers import DefaultRouter
 
 
@@ -21,4 +22,5 @@ urlpatterns = [
     path('home-page/', BusinessProfileHomePageView.as_view(), name='business-profile-home-page'),
     path('update/', BusinessProfileUpdateView.as_view(), name='business-profile-update'),
     path('profile-image/', BusinessProfileImageView.as_view(), name='business-profile-image'),
+    path('account-info/', AccountInfoView.as_view(), name='business-account-info'),
 ]

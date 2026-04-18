@@ -240,3 +240,34 @@ class BusinessProfileImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = BusinessProfile
         fields = ['profile_image', 'profile_image_display']
+
+
+class AccountInfoSerializer(serializers.Serializer):
+    # User fields
+    business_name = serializers.CharField(allow_null=True)
+    email = serializers.EmailField(allow_null=True)
+    phone_number = serializers.CharField(allow_null=True, allow_blank=True)
+
+    # BusinessProfile flat fields
+    business_id = serializers.CharField(allow_null=True)
+    business_type = serializers.CharField(allow_null=True)
+    exchange_rate = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+
+    # City + Country flattened
+    city_id = serializers.IntegerField(allow_null=True)
+    city_name = serializers.CharField(allow_null=True)
+    country_id = serializers.IntegerField(allow_null=True)
+    country_name = serializers.CharField(allow_null=True)
+
+    # Primary currency
+    primary_currency_id = serializers.IntegerField(allow_null=True)
+    primary_currency_name = serializers.CharField(allow_null=True)
+    primary_currency_code = serializers.CharField(allow_null=True)
+
+    # Secondary currency
+    secondary_currency_id = serializers.IntegerField(allow_null=True)
+    secondary_currency_name = serializers.CharField(allow_null=True)
+    secondary_currency_code = serializers.CharField(allow_null=True)
+
+    # Categories list
+    categories = BusinessCategorySerializer(many=True, read_only=True)
