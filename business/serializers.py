@@ -269,5 +269,81 @@ class AccountInfoSerializer(serializers.Serializer):
     secondary_currency_name = serializers.CharField(allow_null=True)
     secondary_currency_code = serializers.CharField(allow_null=True)
 
+    is_primary_to_secondary = serializers.BooleanField(allow_null=True)
+
     # Categories list
     categories = BusinessCategorySerializer(many=True, read_only=True)
+
+    def to_representation(self, instance):
+        # If instance is a dict (as used in views), use default
+        if isinstance(instance, dict):
+            return super().to_representation(instance)
+
+        # If instance is a User or BusinessProfile, build same dict as view expects
+        return super().to_representation(instance)
+
+
+class AccountInfoUpdateSerializer(serializers.Serializer):
+    # User fields
+    business_name = serializers.CharField(required=False)
+    email = serializers.EmailField(required=False)
+    phone_number = serializers.CharField(required=False, allow_blank=True)
+
+    # BusinessProfile flat fields
+    business_id = serializers.CharField(required=False)
+    business_type = serializers.ChoiceField(
+        choices=BusinessProfile.BUSINESS_TYPE_CHOICES,
+        required=False
+    )
+    exchange_rate = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    is_primary_to_secondary = serializers.BooleanField(required=False)
+
+    # City + Currencies as PK related fields (DRF validates existence)
+    # `source` is redundant when it matches the field name and causes an assertion
+    # in recent DRF versions when generating schema. Remove it to avoid errors
+    # while keeping the same validation behaviour.
+    city = serializers.PrimaryKeyRelatedField(queryset=City.objects.all(), required=False)
+    primary_currency = serializers.PrimaryKeyRelatedField(queryset=Currency.objects.all(), required=False)
+    secondary_currency = serializers.PrimaryKeyRelatedField(queryset=Currency.objects.all(), required=False, allow_null=True)
+
+    # Categories: list of IDs
+    categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
+
+    def update(self, instance: BusinessProfile, validated_data):
+        """Update BusinessProfile instance and related User fields.
+
+        `instance` is the BusinessProfile for request.user. User is provided via context['user'].
+        """
+        user = self.context.get('user')
+
+        # Update user fields
+        business_name = validated_data.pop('business_name', None)
+        email = validated_data.pop('email', None)
+        phone_number = validated_data.pop('phone_number', None)
+
+        user_changed = False
+        if business_name is not None:
+            user.business_name = business_name
+            user_changed = True
+        if email is not None:
+            user.email = email
+            user_changed = True
+        if phone_number is not None:
+            user.phone_number = phone_number
+            user_changed = True
+        if user_changed:
+            user.save()
+
+        # Handle categories separately
+        categories = validated_data.pop('categories', None)
+
+        # Set remaining fields on BusinessProfile
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+
+        if categories is not None:
+            instance.categories.set(categories)
+
+        return instance

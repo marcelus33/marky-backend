@@ -17,7 +17,7 @@ from business.serializers import BusinessCategorySerializer, CurrencySerializer,
     BusinessProfileImageSerializer
 from utils.permissions import IsBusinessOrSuperAdmin
 from .models import BusinessProfile
-from business.serializers import AccountInfoSerializer
+from business.serializers import AccountInfoSerializer, AccountInfoUpdateSerializer
 
 
 @extend_schema(tags=['Business'])
@@ -560,6 +560,8 @@ class AccountInfoView(APIView):
             'secondary_currency_name': None,
             'secondary_currency_code': None,
 
+            'is_primary_to_secondary': True,
+
             'categories': [],
         }
 
@@ -602,8 +604,35 @@ class AccountInfoView(APIView):
                     'secondary_currency_code': bp.secondary_currency.code,
                 })
 
+            if bp.is_primary_to_secondary is not None:
+                data.update({
+                    'is_primary_to_secondary': bp.is_primary_to_secondary
+                })
+
             # categories: use serializer to get {id, name} list
             data['categories'] = list(bp.categories.all())
 
         serializer = AccountInfoSerializer(data)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=AccountInfoUpdateSerializer,
+        responses={200: AccountInfoSerializer}
+    )
+    @transaction.atomic
+    def patch(self, request, *args, **kwargs):
+        """Partial update: updates User fields and related BusinessProfile for the authenticated user."""
+        user = request.user
+        try:
+            bp = BusinessProfile.objects.select_for_update().get(user=user)
+        except BusinessProfile.DoesNotExist:
+            return Response({"error": "No business profile found for this user."}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = AccountInfoUpdateSerializer(instance=bp, data=request.data, partial=True, context={"user": user})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+
+        # Return the same representation as GET
+        return self.get(request)
