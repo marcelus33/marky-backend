@@ -1,7 +1,9 @@
 from marky_backend import settings
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes
 from post_office import mail
@@ -26,6 +28,10 @@ class UserRegisterSerializer(serializers.ModelSerializer):
 
         user = User(**validated_data)
         if password:
+            try:
+                validate_password(password, user)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({"password": list(e.messages)})
             user.set_password(password)
         user.save()
 
@@ -45,13 +51,12 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class VerifyEmailSerializer(serializers.Serializer):
-    token = serializers.CharField(required=True)
+    email = serializers.EmailField(required=True)
     verification_code = serializers.CharField(required=True)
 
     def validate_verification_code(self, value):
-        # You can add logic here to validate the verification code if needed
         if len(value) != 6 or not value.isdigit():
-            raise serializers.ValidationError("Verification code must be a 6-digit number.")
+            raise serializers.ValidationError("El código de verificación debe ser un número de 6 dígitos.")
         return value
 
 
@@ -74,8 +79,8 @@ class PasswordRecoverySerializer(serializers.Serializer):
         self.send_recovery_email(user, token, uid)
 
     def send_recovery_email(self, user, token, uid):
-        # TODO: change hardcoded url
-        verification_link = f"http://localhost:3000/reset-password/{uid}/{token}/"
+        from django.conf import settings as django_settings
+        verification_link = f"{django_settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
 
         mail.send(
             user.email,
@@ -108,5 +113,9 @@ class PasswordChangeSerializer(serializers.Serializer):
     def save(self):
         user = self.validated_data['user']
         new_password = self.validated_data['new_password']
+        try:
+            validate_password(new_password, user)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError({"new_password": list(e.messages)})
         user.set_password(new_password)
         user.save()

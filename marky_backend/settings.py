@@ -158,8 +158,10 @@ EMAIL_HOST = env.str("EMAIL_HOST", "")
 EMAIL_HOST_USER = env.str("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = env.str("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", "")
-EMAIL_PORT = env.str("EMAIL_PORT", 465)
-EMAIL_USE_TLS = True
+EMAIL_PORT = env.int("EMAIL_PORT", 587)
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", True)
+
+FRONTEND_URL = env.str('FRONTEND_URL', 'http://localhost:3000')
 
 CORS_ALLOW_ALL = DEBUG
 CORS_ALLOW_ALL_ORIGINS = DEBUG
@@ -175,8 +177,8 @@ CORS_EXPOSE_HEADERS = [
 ]
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': False,
@@ -212,6 +214,17 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
 
     ),
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'auth': '10/minute',
+        'resend': '3/minute',
+        'recovery': '5/minute',
+    },
     'DEFAULT_PARSER_CLASSES': [
         'drf_nested_forms.parsers.NestedMultiPartParser',
         'drf_nested_forms.parsers.NestedJSONParser',
@@ -247,7 +260,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'handlers': {
         'console': {
-            'level': env.bool('LOGGING_LEVEL', default='DEBUG'),
+            'level': env.str('LOGGING_LEVEL', default='DEBUG'),
             'class': 'logging.StreamHandler',
         },
     },

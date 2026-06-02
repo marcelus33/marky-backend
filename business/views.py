@@ -1,3 +1,5 @@
+import logging
+
 from cities_light.models import City, Country
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework import generics, filters
@@ -9,12 +11,15 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db import transaction
 
+logger = logging.getLogger(__name__)
+
 from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
 from business.serializers import BusinessCategorySerializer, CurrencySerializer, CitySerializer, CountrySerializer, \
     BusinessProfileWriteSerializer, BusinessProfileListSerializer, BusinessProfileDetailSerializer, SocialMediaLinkSerializer, \
     SocialMediaLinkBulkUpdateSerializer, SocialMediaLinkBulkUpdateResponseSerializer, BusinessProfileHomePageSerializer, \
     BusinessProfileUpdateSerializer, BusinessProfileUpdateResponseSerializer, BranchAttributeSerializer, \
     BusinessProfileImageSerializer
+from rest_framework.permissions import AllowAny
 from utils.permissions import IsBusinessOrSuperAdmin
 from .models import BusinessProfile
 from business.serializers import AccountInfoSerializer, AccountInfoUpdateSerializer
@@ -28,6 +33,11 @@ class BusinessProfileViewSet(mixins.CreateModelMixin,
     permission_classes = [IsBusinessOrSuperAdmin]
     queryset = BusinessProfile.objects.all()
     serializer_class = BusinessProfileWriteSerializer
+
+    def get_queryset(self):
+        if self.request.user.is_superuser:
+            return BusinessProfile.objects.all()
+        return BusinessProfile.objects.filter(user=self.request.user)
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -98,11 +108,7 @@ class CountryListView(generics.ListAPIView):
 
 
 class ValidateBusinessNameView(APIView):
-    """
-    API view to validate if a business name is already taken.
-    It expects a query parameter 'business_name' and returns:
-      { "is_taken": true/false }
-    """
+    permission_classes = [AllowAny]
 
     def get(self, request, format=None):
         business_id = request.query_params.get("business_id", None)
@@ -281,10 +287,10 @@ class SocialMediaLinkBulkUpdateView(APIView):
                 
                 return Response(response_data, status=status.HTTP_200_OK)
                 
-        except Exception as e:
-            # Any error will cause the entire transaction to be rolled back
+        except Exception:
+            logger.exception("Error updating social media links for user %s", request.user.id)
             return Response(
-                {"error": f"Failed to update social media links: {str(e)}"},
+                {"error": "Ha ocurrido un error inesperado."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -456,10 +462,10 @@ class BusinessProfileUpdateView(APIView):
                 
                 return Response(response_data, status=status.HTTP_200_OK)
                 
-        except Exception as e:
-            # Any error will cause the entire transaction to be rolled back
+        except Exception:
+            logger.exception("Error updating business profile for user %s", request.user.id)
             return Response(
-                {"error": f"Failed to update business profile: {str(e)}"},
+                {"error": "Ha ocurrido un error inesperado."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

@@ -1,3 +1,4 @@
+import logging
 import random
 import string
 from datetime import timedelta
@@ -6,6 +7,7 @@ from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.models import Group
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema
 from post_office import mail
@@ -14,7 +16,7 @@ from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken, UntypedToken
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
     TokenRefreshView, )
 
@@ -23,12 +25,14 @@ from users.serializers import UserRegisterSerializer, UserLoginSerializer, Verif
     PasswordRecoverySerializer, PasswordChangeSerializer, ResendVerificationSerializer, UserSerializer
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 @extend_schema(tags=['Auth'])
 class RegisterView(generics.CreateAPIView):
     serializer_class = UserRegisterSerializer
     permission_classes = [AllowAny]
+    throttle_scope = 'auth'
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -44,15 +48,11 @@ class RegisterView(generics.CreateAPIView):
                     business_group.user_set.add(user)
 
                 verification_code = ''.join(random.choices(string.digits, k=6))
+                user.verification_code = verification_code
+                user.verification_code_expires_at = timezone.now() + timedelta(minutes=15)
+                user.save(update_fields=['verification_code', 'verification_code_expires_at'])
 
-                refresh = RefreshToken.for_user(user)
-                access_token = refresh.access_token
-                access_token.set_exp(lifetime=timedelta(minutes=15))
-                access_token['verification_code'] = verification_code
-                access_token_str = str(access_token)
-                # TODO change hardcoded link
-                verification_link = f"http://localhost:3000/verify-email/{access_token_str}"
-
+                verification_link = f"{settings.FRONTEND_URL}/verify-email/"
                 mail.send(
                     user.email,
                     settings.DEFAULT_FROM_EMAIL,
@@ -63,15 +63,15 @@ class RegisterView(generics.CreateAPIView):
                     },
                 )
         except Exception as e:
+            logger.exception("Error during user registration")
             return Response(
-                {"error": f"{str(e)}"},
+                {"error": "Ha ocurrido un error inesperado durante el registro."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
         return Response(
             {"message": "Cuenta creada con éxito. Se ha enviado una verificación a su email.",
              "user": UserSerializer(user).data,
-             "verification_link": access_token_str,
              },
             status=status.HTTP_201_CREATED
         )
@@ -81,6 +81,7 @@ class RegisterView(generics.CreateAPIView):
 class LoginView(generics.GenericAPIView):
     serializer_class = UserLoginSerializer
     permission_classes = [AllowAny]
+    throttle_scope = 'auth'
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -106,41 +107,47 @@ class LoginView(generics.GenericAPIView):
 
 @extend_schema(tags=['Auth'])
 class CustomTokenRefreshView(TokenRefreshView):
-    pass
+    permission_classes = [AllowAny]
 
 
 @extend_schema(tags=['Auth'])
 class VerifyEmailView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
     serializer_class = VerifyEmailSerializer
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        token = serializer.validated_data['token']
+        email = serializer.validated_data['email']
         verification_code = serializer.validated_data['verification_code']
 
         try:
-            access_token = UntypedToken(token)
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({"message": "Código inválido."}, status=status.HTTP_400_BAD_REQUEST)
 
-            token_code = access_token['verification_code']
-            if verification_code == token_code:
-                user_id = access_token['user_id']
-                user = User.objects.get(id=user_id)
-                user.is_verified = True
-                user.save()
+        if user.is_verified:
+            return Response({"detail": "Este usuario ya se encuentra verificado."}, status=status.HTTP_400_BAD_REQUEST)
 
-                return Response({"message": "Correo verificado con éxito."}, status=status.HTTP_200_OK)
-            else:
-                return Response({"message": "Código inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        now = timezone.now()
+        if (user.verification_code != verification_code
+                or user.verification_code_expires_at is None
+                or user.verification_code_expires_at < now):
+            return Response({"message": "Código inválido o expirado."}, status=status.HTTP_400_BAD_REQUEST)
 
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        user.is_verified = True
+        user.verification_code = None
+        user.verification_code_expires_at = None
+        user.save(update_fields=['is_verified', 'verification_code', 'verification_code_expires_at'])
+
+        return Response({"message": "Correo verificado con éxito."}, status=status.HTTP_200_OK)
 
 
 @extend_schema(tags=['Auth'])
 class ResendVerificationView(generics.GenericAPIView):
     permission_classes = [AllowAny]
+    throttle_scope = 'resend'
     serializer_class = ResendVerificationSerializer
 
     @transaction.atomic
@@ -163,24 +170,17 @@ class ResendVerificationView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Generar un nuevo código de verificación
         verification_code = ''.join(random.choices(string.digits, k=6))
+        user.verification_code = verification_code
+        user.verification_code_expires_at = timezone.now() + timedelta(minutes=15)
+        user.save(update_fields=['verification_code', 'verification_code_expires_at'])
 
-        # Generar un nuevo token con 15 minutos de vigencia
-        refresh = RefreshToken.for_user(user)
-        access_token = refresh.access_token
-        access_token.set_exp(lifetime=timedelta(minutes=15))
-        access_token['verification_code'] = verification_code
-
-        # TODO: change hardcoded link
-        verification_link = f"http://localhost:3000/verify-email/{str(access_token)}"
-
+        verification_link = f"{settings.FRONTEND_URL}/verify-email/"
         mail.send(
             user.email,
             settings.DEFAULT_FROM_EMAIL,
             template='verify_email',
             context={'verification_link': verification_link, 'verification_code': verification_code},
-            # priority='now',
         )
 
         return Response(
@@ -191,6 +191,8 @@ class ResendVerificationView(generics.GenericAPIView):
 
 @extend_schema(tags=['Auth'])
 class PasswordRecoveryView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+    throttle_scope = 'recovery'
     serializer_class = PasswordRecoverySerializer
 
     def post(self, request, *args, **kwargs):
@@ -202,6 +204,7 @@ class PasswordRecoveryView(generics.GenericAPIView):
 
 @extend_schema(tags=['Auth'])
 class PasswordChangeView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
     serializer_class = PasswordChangeSerializer
 
     def post(self, request, *args, **kwargs):

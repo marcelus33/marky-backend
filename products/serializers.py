@@ -167,7 +167,6 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
         fields = ['id', 'file', 'media_type', 'order', '_delete']
 
     def to_internal_value(self, data):
-        print("Raw _delete value:", data.get("_delete"))
         if "_delete" in data and isinstance(data["_delete"], str):
             data["_delete"] = data["_delete"].lower() in ("true", "1")
         return super().to_internal_value(data)

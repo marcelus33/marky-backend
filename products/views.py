@@ -1,5 +1,9 @@
+import logging
+
 from django.db import transaction, models
 from django_filters import rest_framework as filters
+
+logger = logging.getLogger(__name__)
 from drf_spectacular.utils import extend_schema, OpenApiParameter, extend_schema_view
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status
@@ -9,6 +13,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from drf_nested_forms.parsers import NestedMultiPartParser
 from rest_framework.response import Response
 from rest_framework import serializers
+from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product
@@ -39,6 +44,7 @@ from .serializers import (
 )
 @extend_schema(tags=['Products'])
 class ProductCategoryViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsBusinessOrSuperAdmin]
     serializer_class = ProductCategoryBasicSerializer
     queryset = ProductCategory.objects.all()
 
@@ -90,8 +96,9 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 for category_data in categories_data:
                     ProductCategory.objects.filter(id=category_data['id']).update(order=category_data['order'])
-        except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("Error updating category order for user %s", request.user.id)
+            return Response({'error': 'Ha ocurrido un error inesperado.'}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({'status': 'Order updated successfully'}, status=status.HTTP_200_OK)
 
@@ -167,6 +174,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
 @extend_schema(tags=['Products'])
 class ProductViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsBusinessOrSuperAdmin]
     queryset = Product.objects.all()
     parser_classes = (NestedMultiPartParser, FormParser)
 
