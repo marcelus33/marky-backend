@@ -1,0 +1,12 @@
+.git
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+db.sqlite3
+media/
+.idea/
+env/
+venv/
+staticfiles/
+cities/

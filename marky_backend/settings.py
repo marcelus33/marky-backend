@@ -33,7 +33,7 @@ DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = env.list("HOST", default=["*"])
 
-# SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # SECURE_SSL_REDIRECT = env.bool("SECURE_REDIRECT", default=False)
 # FIELD_ENCRYPTION_KEY = env.str("FIELD_ENCRYPTION_KEY", default=None)
 
@@ -61,6 +61,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -142,8 +143,34 @@ LOCALE_PATHS = [
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+}
+
+if env.str("AWS_ACCESS_KEY_ID", default=None):
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": env.str("AWS_ACCESS_KEY_ID"),
+            "secret_key": env.str("AWS_SECRET_ACCESS_KEY"),
+            "bucket_name": env.str("AWS_STORAGE_BUCKET_NAME"),
+            "endpoint_url": env.str("AWS_S3_ENDPOINT_URL"),
+            "file_overwrite": False,
+            "default_acl": None,
+        },
+    }
+    _r2_custom_domain = env.str("AWS_S3_CUSTOM_DOMAIN", default=None)
+    if _r2_custom_domain:
+        MEDIA_URL = f"https://{_r2_custom_domain}/"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -170,7 +197,7 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:8000',
     'http://0.0.0.0:8000',
     'http://0.0.0.0:3000',
-]
+] + env.list("CORS_ALLOWED_ORIGINS", default=[])
 
 CORS_EXPOSE_HEADERS = [
     'content-disposition',
