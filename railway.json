@@ -5,8 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "releaseCommand": "python manage.py collectstatic --noinput && python manage.py migrate && python manage.py seed",
-    "startCommand": "gunicorn marky_backend.wsgi:application --bind 0.0.0.0:$PORT --workers 2",
+    "preDeployCommand": "python manage.py collectstatic --noinput && python manage.py migrate && python manage.py seed",
+    "startCommand": "sh -c \"gunicorn marky_backend.wsgi:application --bind 0.0.0.0:$PORT --workers 2\"",
     "healthcheckPath": "/api/schema/",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
