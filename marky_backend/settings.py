@@ -187,6 +187,11 @@ EMAIL_HOST_PASSWORD = env.str("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", "")
 EMAIL_PORT = env.int("EMAIL_PORT", 587)
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", True)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", False)
+
+POST_OFFICE = {
+    'DEFAULT_PRIORITY': 'now',
+}
 
 FRONTEND_URL = env.str('FRONTEND_URL', 'http://localhost:3000')
 
