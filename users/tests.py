@@ -57,6 +57,25 @@ class TestRegister(MarkyAPITestCase):
         })
         self.assertEqual(response.status_code, 400)
 
+    @patch('users.views.mail.send')
+    def test_register_accepts_business_name_at_15_char_boundary(self, mock_mail):
+        response = self.client.post('/api/v1/users/register/', {
+            'username': 'boundaryuser',
+            'email': 'boundaryuser@test.com',
+            'password': 'TestPass123!',
+            'business_name': 'a' * 15,
+        })
+        self.assertEqual(response.status_code, 201)
+
+    def test_register_business_name_over_15_chars_returns_400(self):
+        response = self.client.post('/api/v1/users/register/', {
+            'username': 'toolonguser',
+            'email': 'toolonguser@test.com',
+            'password': 'TestPass123!',
+            'business_name': 'a' * 16,
+        })
+        self.assertEqual(response.status_code, 400)
+
 
 class TestEmailVerification(MarkyAPITestCase):
 

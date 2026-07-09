@@ -11,6 +11,8 @@ User = get_user_model()
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
+    business_name = serializers.CharField(max_length=15)
+
     class Meta:
         model = User
         fields = ['email', 'password', 'business_name', 'phone_number']
