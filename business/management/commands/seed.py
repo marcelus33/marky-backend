@@ -5,8 +5,8 @@ from post_office.models import EmailTemplate
 
 
 CURRENCIES = [
-    {"code": "PYG", "name": "Guaraní"},
-    {"code": "VES", "name": "Bolívar"},
+    {"code": "PYG", "name": "Guaraní Paraguayo"},
+    {"code": "VES", "name": "Bolívar Venezolano"},
     {"code": "USD", "name": "Dólar Americano"},
 ]
 
