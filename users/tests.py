@@ -25,6 +25,18 @@ class TestRegister(MarkyAPITestCase):
         self.assertIsNotNone(user.verification_code)
 
     @patch('users.views.mail.send')
+    def test_register_trims_business_name_whitespace(self, mock_mail):
+        response = self.client.post('/api/v1/users/register/', {
+            'username': 'trimuser',
+            'email': 'trimuser@test.com',
+            'password': 'TestPass123!',
+            'business_name': '  Dulce Momento  ',
+        })
+        self.assertEqual(response.status_code, 201)
+        user = User.objects.get(email='trimuser@test.com')
+        self.assertEqual(user.business_name, 'Dulce Momento')
+
+    @patch('users.views.mail.send')
     def test_register_adds_user_to_business_group(self, mock_mail):
         self.client.post('/api/v1/users/register/', {
             'username': 'groupuser',
@@ -58,21 +70,21 @@ class TestRegister(MarkyAPITestCase):
         self.assertEqual(response.status_code, 400)
 
     @patch('users.views.mail.send')
-    def test_register_accepts_business_name_at_15_char_boundary(self, mock_mail):
+    def test_register_accepts_business_name_at_22_char_boundary(self, mock_mail):
         response = self.client.post('/api/v1/users/register/', {
             'username': 'boundaryuser',
             'email': 'boundaryuser@test.com',
             'password': 'TestPass123!',
-            'business_name': 'a' * 15,
+            'business_name': 'a' * 22,
         })
         self.assertEqual(response.status_code, 201)
 
-    def test_register_business_name_over_15_chars_returns_400(self):
+    def test_register_business_name_over_22_chars_returns_400(self):
         response = self.client.post('/api/v1/users/register/', {
             'username': 'toolonguser',
             'email': 'toolonguser@test.com',
             'password': 'TestPass123!',
-            'business_name': 'a' * 16,
+            'business_name': 'a' * 23,
         })
         self.assertEqual(response.status_code, 400)
 

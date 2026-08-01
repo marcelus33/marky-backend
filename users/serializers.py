@@ -11,11 +11,17 @@ User = get_user_model()
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
-    business_name = serializers.CharField(max_length=15)
+    business_name = serializers.CharField(max_length=22)
 
     class Meta:
         model = User
         fields = ['email', 'password', 'business_name', 'phone_number']
+
+    def validate_business_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Este campo es requerido.")
+        return value
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
