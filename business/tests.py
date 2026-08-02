@@ -1,4 +1,7 @@
+from django.test import TestCase
 from utils.tests_base import MarkyAPITestCase
+from business.management.commands.seed import Command
+from business.models import Currency
 
 
 class TestBusinessProfileTenancy(MarkyAPITestCase):
@@ -32,3 +35,15 @@ class TestBusinessProfileTenancy(MarkyAPITestCase):
         client = self.auth_client(superuser)
         response = client.get(f'/api/v1/business/business_profile/{self.profile_a.id}/')
         self.assertEqual(response.status_code, 200)
+
+
+class TestSeedCurrencyNames(TestCase):
+    """Regression test for the Asana ticket 'Step 3 ... Ajuste de textos':
+    currency names must be the full display name shown in the frontend
+    dropdown, not the abbreviated form."""
+
+    def test_seed_creates_currencies_with_full_names(self):
+        Command()._seed_currencies()
+        self.assertEqual(Currency.objects.get(code='PYG').name, 'Guaraní Paraguayo')
+        self.assertEqual(Currency.objects.get(code='VES').name, 'Bolívar Venezolano')
+        self.assertEqual(Currency.objects.get(code='USD').name, 'Dólar Americano')

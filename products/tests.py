@@ -218,6 +218,87 @@ class TestPromotionFilter(MarkyAPITestCase):
         self.assertIn(self.cat_multibuy.id, all_ids)
 
 
+class TestWithProductsPromotionFilter(MarkyAPITestCase):
+    """Covers the with_products endpoint: when has_promotion=true, only categories that
+    qualify should be returned, and only the products actually on promotion within them
+    (own promo, or inherited from an active category-level promo) should be shown."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('promo_endpoint_user', 'promo_endpoint@test.com')
+
+        # Category with no promotion of its own, but a mix of promoted/unpromoted products.
+        cls.cat_mixed = ProductCategory.objects.create(
+            business=cls.profile, name='Galletas', icon='icon',
+        )
+        cls.promoted_product = Product.objects.create(
+            name='Promoted', description='Desc', price=Decimal('3.00'),
+            business=cls.profile, category=cls.cat_mixed, discount_percentage=Decimal('30.00'),
+        )
+        cls.unpromoted_product_1 = Product.objects.create(
+            name='Unpromoted 1', description='Desc', price=Decimal('2.00'),
+            business=cls.profile, category=cls.cat_mixed,
+        )
+        cls.unpromoted_product_2 = Product.objects.create(
+            name='Unpromoted 2', description='Desc', price=Decimal('2.00'),
+            business=cls.profile, category=cls.cat_mixed,
+        )
+
+        # Category with its own active promotion: every product in it inherits the promo.
+        cls.cat_promo = ProductCategory.objects.create(
+            business=cls.profile, name='Bebidas', icon='icon', discount_percentage=Decimal('10.00'),
+        )
+        cls.inherited_product = Product.objects.create(
+            name='Inherited', description='Desc', price=Decimal('5.00'),
+            business=cls.profile, category=cls.cat_promo,
+        )
+
+        # Category with no promotion at all: should be excluded entirely.
+        cls.cat_none = ProductCategory.objects.create(
+            business=cls.profile, name='Sin promo', icon='icon',
+        )
+        Product.objects.create(
+            name='No promo product', description='Desc', price=Decimal('1.00'),
+            business=cls.profile, category=cls.cat_none,
+        )
+
+    def test_only_promoted_products_shown_in_mixed_category(self):
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/', {'has_promotion': 'true'})
+        self.assertEqual(response.status_code, 200)
+
+        results = {cat['name']: cat for cat in response.data['results']}
+        self.assertNotIn('Sin promo', results)
+
+        mixed_product_ids = {p['id'] for p in results['Galletas']['products']}
+        self.assertEqual(mixed_product_ids, {self.promoted_product.id})
+
+    def test_all_products_shown_when_category_has_active_promotion(self):
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/', {'has_promotion': 'true'})
+
+        results = {cat['name']: cat for cat in response.data['results']}
+        promo_product_ids = {p['id'] for p in results['Bebidas']['products']}
+        self.assertEqual(promo_product_ids, {self.inherited_product.id})
+
+    def test_products_count_reflects_only_promoted_products(self):
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/', {'has_promotion': 'true'})
+        # promoted_product (Galletas) + inherited_product (Bebidas) = 2
+        self.assertEqual(response.data['products_count'], 2)
+
+    def test_without_filter_all_products_shown(self):
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/')
+        results = {cat['name']: cat for cat in response.data['results']}
+        mixed_product_ids = {p['id'] for p in results['Galletas']['products']}
+        self.assertEqual(
+            mixed_product_ids,
+            {self.promoted_product.id, self.unpromoted_product_1.id, self.unpromoted_product_2.id},
+        )
+
+
 class TestProductTenancy(MarkyAPITestCase):
 
     @classmethod

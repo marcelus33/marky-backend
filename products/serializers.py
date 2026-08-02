@@ -253,6 +253,7 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
 class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     isFavorite = serializers.SerializerMethodField()
+    isRecommended = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
     # Promotion fields: prefer category values when present and active, otherwise fall back to product
     multibuy_option = serializers.SerializerMethodField()
@@ -264,7 +265,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ['id', 'name', 'description', 'price', 'isFavorite', 'image',
+        fields = ['id', 'name', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at', 'is_available',
                   'primary_price', 'secondary_price']
 
@@ -315,6 +316,9 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
     def get_isFavorite(self, obj):
         return obj.stopper == 'FAVORITE'
+
+    def get_isRecommended(self, obj):
+        return obj.stopper == 'RECOMMENDED'
 
     def get_image(self, obj):
         request = self.context.get('request')

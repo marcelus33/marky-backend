@@ -14,7 +14,7 @@ from drf_nested_forms.parsers import NestedMultiPartParser
 from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
-from .filters import ProductCategoryFilter
+from .filters import ProductCategoryFilter, product_has_active_promotion_q
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product
 from .serializers import (
@@ -118,17 +118,30 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], serializer_class=ProductCategoryWithProductsSerializer)
     def with_products(self, request):
         base_qs = self.get_base_queryset()
-        filtered_qs = ProductCategoryFilter(request.GET, queryset=base_qs).qs
+        category_filter = ProductCategoryFilter(request.GET, queryset=base_qs)
+        filtered_qs = category_filter.qs
+        has_promotion = bool(category_filter.form.cleaned_data.get('has_promotion'))
 
-        products_count = filtered_qs.aggregate(total_products=models.Count('products'))['total_products']
+        if has_promotion:
+            products_count = Product.objects.filter(category__in=filtered_qs).filter(
+                product_has_active_promotion_q()
+            ).count()
+            # Only the products that are actually on promotion should be shown within each category
+            filtered_qs = filtered_qs.prefetch_related(
+                models.Prefetch('products', queryset=Product.objects.filter(product_has_active_promotion_q()))
+            )
+        else:
+            products_count = filtered_qs.aggregate(total_products=models.Count('products'))['total_products']
 
         page = self.paginate_queryset(filtered_qs)
         if page is not None:
             serializer = self.get_serializer(page, many=True, context={'request': request})
             serialized_data = serializer.data
-            
+
             # Now, handle products without a category
             products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
+            if has_promotion:
+                products_without_category = products_without_category.filter(product_has_active_promotion_q())
             if products_without_category.exists():
                 uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
                 no_category_data = {
@@ -152,6 +165,8 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
         # Also handle for non-paginated response
         products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
+        if has_promotion:
+            products_without_category = products_without_category.filter(product_has_active_promotion_q())
         if products_without_category.exists():
             uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
             no_category_data = {
