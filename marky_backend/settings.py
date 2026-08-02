@@ -165,6 +165,8 @@ if env.str("AWS_ACCESS_KEY_ID", default=None):
             "secret_key": env.str("AWS_SECRET_ACCESS_KEY"),
             "bucket_name": env.str("AWS_STORAGE_BUCKET_NAME"),
             "endpoint_url": env.str("AWS_S3_ENDPOINT_URL"),
+            "region_name": env.str("AWS_S3_REGION_NAME", default="auto"),
+            "signature_version": "s3v4",
             "file_overwrite": False,
             "default_acl": None,
         },
