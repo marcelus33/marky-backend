@@ -182,9 +182,12 @@ class ProductAddonSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
 
 class ProductAddonInputSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
+    _delete = serializers.BooleanField(required=False, default=False)
+
     class Meta:
         model = ProductAddon
-        fields = ['name', 'price']
+        fields = ['id', 'name', 'price', '_delete']
 
 
 class ProductVariantSerializer(ProductPriceMixin, serializers.ModelSerializer):
@@ -458,8 +461,27 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 if not countdown_active:
                     data['promotion_starts_at'] = None
                     data['promotion_ends_at'] = None
-        
+
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        stopper = attrs.get('stopper', getattr(self.instance, 'stopper', None))
+        category = attrs.get('category', getattr(self.instance, 'category', None))
+
+        if stopper == 'FAVORITE' and category is not None:
+            conflicting = Product.objects.filter(category=category, stopper='FAVORITE')
+            if self.instance is not None:
+                conflicting = conflicting.exclude(pk=self.instance.pk)
+            existing = conflicting.first()
+            if existing is not None:
+                raise serializers.ValidationError({
+                    'error': (
+                        f'"{existing.name}" ya es el Favorito del mes en esta categoría. '
+                        'Quita esa etiqueta antes de asignarla a otro producto.'
+                    )
+                })
+
+        return attrs
 
     @transaction.atomic
     def create(self, validated_data):
