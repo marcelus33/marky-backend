@@ -426,6 +426,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
     is_promotion_active = serializers.BooleanField(write_only=True, required=False)
     promotion_option = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
     countdown_active = serializers.BooleanField(write_only=True, required=False)
+    description = serializers.CharField(max_length=300)
 
     class Meta:
         model = Product

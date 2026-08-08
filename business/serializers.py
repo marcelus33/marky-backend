@@ -181,8 +181,9 @@ class BusinessProfileUpdateSerializer(serializers.Serializer):
     At least one field must be provided.
     """
     description = serializers.CharField(
-        required=False, 
-        allow_blank=True, 
+        required=False,
+        allow_blank=True,
+        max_length=100,
         help_text="Business profile description"
     )
     headquarter_attributes = serializers.ListField(
