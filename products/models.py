@@ -68,6 +68,15 @@ class Product(models.Model):
     #
     business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='products')
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['category'],
+                condition=models.Q(stopper='FAVORITE'),
+                name='unique_favorite_stopper_per_category',
+            ),
+        ]
+
     def __str__(self):
         return self.name
 

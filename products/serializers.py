@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.utils import timezone
 from decimal import Decimal
 
@@ -430,6 +430,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
     promotion_option = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
     countdown_active = serializers.BooleanField(write_only=True, required=False)
     description = serializers.CharField(max_length=300)
+    category = serializers.PrimaryKeyRelatedField(
+        queryset=ProductCategory.objects.none(), required=False, allow_null=True
+    )
 
     class Meta:
         model = Product
@@ -440,6 +443,14 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'variants', 'addons', 'media', 'is_available',
             'is_promotion_active', 'promotion_option', 'countdown_active'
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request is not None and hasattr(request.user, 'business_profile'):
+            self.fields['category'].queryset = ProductCategory.objects.filter(
+                business=request.user.business_profile
+            )
 
     def to_internal_value(self, data):
         if 'is_promotion_active' in data:
@@ -492,7 +503,15 @@ class ProductInputSerializer(serializers.ModelSerializer):
         validated_data.pop('promotion_option', None)
         validated_data.pop('countdown_active', None)
 
-        product = Product.objects.create(**validated_data)
+        try:
+            product = Product.objects.create(**validated_data)
+        except IntegrityError:
+            raise serializers.ValidationError({
+                'error': (
+                    'Ya existe un Favorito del mes en esta categoría. '
+                    'Quita esa etiqueta antes de asignarla a otro producto.'
+                )
+            })
 
         for variant_data in variants_data:
             if '_delete' in variant_data:
