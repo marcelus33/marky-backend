@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase
 from django.utils import timezone
+from rest_framework import serializers
 
 from utils.tests_base import MarkyAPITestCase
 from products.filters import ProductCategoryFilter
@@ -395,3 +396,106 @@ class TestProductCategoryTenancy(MarkyAPITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 404)
+
+
+class TestProductInputSerializerTenancy(MarkyAPITestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user_a, cls.profile_a = cls.make_user('input_tenant_a', 'input_tenant_a@test.com')
+        cls.user_b, cls.profile_b = cls.make_user('input_tenant_b', 'input_tenant_b@test.com')
+
+        cls.cat_a = ProductCategory.objects.create(business=cls.profile_a, name='Cat A', icon='icon')
+        cls.cat_b = ProductCategory.objects.create(business=cls.profile_b, name='Cat B', icon='icon')
+
+        cls.favorite_b = Product.objects.create(
+            name='Secret Favorite', description='Desc', price=Decimal('10.00'),
+            business=cls.profile_b, category=cls.cat_b, stopper='FAVORITE',
+        )
+
+    def test_cannot_assign_product_to_another_tenants_category(self):
+        client = self.auth_client(self.user_a)
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'New Product', 'description': 'Desc', 'price': '5.00',
+                'category': self.cat_b.id, 'stopper': 'FAVORITE',
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('category', response.data)
+        # Must be rejected before the FAVORITE-conflict check ever runs, so
+        # tenant B's product name can never reach tenant A's response.
+        self.assertNotIn('Secret Favorite', str(response.data))
+
+
+class TestProductFavoriteStopperConstraint(MarkyAPITestCase):
+    """DB-level backstop for the FAVORITE-per-category uniqueness rule.
+
+    The serializer's read-then-write check has a TOCTOU gap under concurrent
+    requests; a DB constraint guarantees the invariant regardless of races.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('constraint_tenant', 'constraint_tenant@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_second_favorite_in_same_category_raises_integrity_error(self):
+        from django.db import IntegrityError
+
+        Product.objects.create(
+            name='First Favorite', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='FAVORITE',
+        )
+        with self.assertRaises(IntegrityError):
+            Product.objects.create(
+                name='Second Favorite', description='Desc', price=Decimal('20.00'),
+                business=self.profile, category=self.category, stopper='FAVORITE',
+            )
+
+    def test_multiple_non_favorite_products_allowed_in_same_category(self):
+        Product.objects.create(
+            name='Regular 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+        Product.objects.create(
+            name='Regular 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category,
+        )
+        self.assertEqual(Product.objects.filter(category=self.category).count(), 2)
+
+    def test_favorite_allowed_in_different_categories(self):
+        other_category = ProductCategory.objects.create(business=self.profile, name='Other', icon='icon')
+        Product.objects.create(
+            name='Favorite 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='FAVORITE',
+        )
+        Product.objects.create(
+            name='Favorite 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=other_category, stopper='FAVORITE',
+        )
+        self.assertEqual(Product.objects.filter(stopper='FAVORITE').count(), 2)
+
+    def test_race_past_serializer_check_still_returns_validation_error_not_500(self):
+        """Simulate the TOCTOU window: two requests both pass validate() because
+        neither commit is visible to the other yet, so the DB constraint is the
+        only thing standing between them. The second create() call should turn
+        the resulting IntegrityError into a clean DRF ValidationError, not a 500.
+        """
+        from products.serializers import ProductInputSerializer
+
+        Product.objects.create(
+            name='First Favorite', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='FAVORITE',
+        )
+
+        serializer = ProductInputSerializer()
+        with self.assertRaises(serializers.ValidationError):
+            serializer.create({
+                'name': 'Second Favorite', 'description': 'Desc', 'price': Decimal('20.00'),
+                'business': self.profile, 'category': self.category, 'stopper': 'FAVORITE',
+            })
