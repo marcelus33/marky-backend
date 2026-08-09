@@ -5,6 +5,45 @@ from decimal import Decimal
 
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
 
+# Currencies conventionally quoted without cents (mirrors ISO 4217 zero-decimal
+# currencies relevant to Marky's markets, e.g. Guaraní Paraguayo).
+ZERO_DECIMAL_CURRENCY_CODES = {'PYG'}
+
+
+def format_currency_amount(amount, code):
+    """Format a Decimal amount consistently for display, e.g. 'USD 1.000.000,00' or 'PYG 150.000'.
+
+    Decimal places are currency-aware: zero-decimal currencies (see
+    ZERO_DECIMAL_CURRENCY_CODES) are shown without cents, everything else
+    with exactly 2. Thousands are dot-separated, decimals comma-separated
+    (LATAM/Spanish formatting), matching how price inputs are normalized.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+
+    if amount is None:
+        return None
+
+    if not isinstance(amount, Decimal):
+        try:
+            amount = Decimal(str(amount))
+        except Exception:
+            return None
+
+    decimal_places = 0 if code in ZERO_DECIMAL_CURRENCY_CODES else 2
+    quantum = Decimal('1') if decimal_places == 0 else Decimal('0.01')
+    quantized = amount.quantize(quantum, rounding=ROUND_HALF_UP)
+
+    if decimal_places == 0:
+        integer_with_commas = f"{int(quantized):,}"
+        integer_with_dots = integer_with_commas.replace(',', '.')
+        return f"{code} {integer_with_dots}"
+
+    s = f"{quantized:.2f}"
+    integer_part, decimal_part = s.split('.')
+    integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
+    integer_with_dots = integer_with_commas.replace(',', '.')
+    return f"{code} {integer_with_dots},{decimal_part}"
+
 
 class ProductPriceMixin:
     """Provide helper methods used to compute/format primary/secondary prices.
@@ -29,25 +68,7 @@ class ProductPriceMixin:
         return None
 
     def _format_currency_amount(self, amount, code):
-        """Format Decimal amount like: 'USD 1.000.000,00'"""
-        from decimal import Decimal, ROUND_HALF_UP
-
-        if amount is None:
-            return None
-
-        if not isinstance(amount, Decimal):
-            try:
-                amount = Decimal(str(amount))
-            except Exception:
-                return None
-
-        quantized = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        # Use grouping with commas then convert to dots for thousands and comma for decimals
-        s = f"{quantized:.2f}"
-        integer_part, decimal_part = s.split('.')
-        integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
-        integer_with_dots = integer_with_commas.replace(',', '.')
-        return f"{code} {integer_with_dots},{decimal_part}"
+        return format_currency_amount(amount, code)
 
     def _is_date_range_active(self, start, end):
         """Return True if the date range is considered active for now.
@@ -277,27 +298,6 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
         if request and hasattr(request.user, 'business_profile'):
             return request.user.business_profile
         return getattr(obj, 'business', None)
-
-    def _format_currency_amount(self, amount, code):
-        """Format Decimal amount like: 'USD 1.000.000,00'"""
-        from decimal import Decimal, ROUND_HALF_UP
-
-        if amount is None:
-            return None
-
-        if not isinstance(amount, Decimal):
-            try:
-                amount = Decimal(str(amount))
-            except Exception:
-                return None
-
-        quantized = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        # Use grouping with commas then convert to dots for thousands and comma for decimals
-        s = f"{quantized:.2f}"
-        integer_part, decimal_part = s.split('.')
-        integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
-        integer_with_dots = integer_with_commas.replace(',', '.')
-        return f"{code} {integer_with_dots},{decimal_part}"
 
     def get_primary_price(self, obj):
         bp = self._get_business_profile(obj)

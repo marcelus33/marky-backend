@@ -1,3 +1,5 @@
+from decimal import Decimal
+from django.core.validators import MinValueValidator
 from django.db import models
 from business.models import BusinessProfile
 
@@ -42,7 +44,7 @@ class Product(models.Model):
 
     name = models.CharField(max_length=255)
     description = models.TextField()
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE,
                                  related_name='products', null=True, blank=True)
     is_active = models.BooleanField(default=True) ## hidden or visible
@@ -123,7 +125,7 @@ class Product(models.Model):
 class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
     name = models.CharField(max_length=255)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     description = models.TextField(blank=True, null=True)
     image = models.ImageField(upload_to='product_variants/', blank=True, null=True)
 
@@ -168,7 +170,7 @@ class ProductVariant(models.Model):
 class ProductAddon(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='addons')
     name = models.CharField(max_length=255)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
 
     def __str__(self):
         return f'{self.product.name} - {self.name}'
