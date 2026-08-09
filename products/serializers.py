@@ -284,6 +284,9 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     discount_percentage = serializers.SerializerMethodField()
     primary_price = serializers.SerializerMethodField()
     secondary_price = serializers.SerializerMethodField()
+    # Human-readable discounted prices (None when there is no active percentage discount)
+    primary_price_with_discount = serializers.SerializerMethodField()
+    secondary_price_with_discount = serializers.SerializerMethodField()
     # promotion_starts_at = serializers.SerializerMethodField()
     # promotion_ends_at = serializers.SerializerMethodField()
 
@@ -291,7 +294,8 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
         model = Product
         fields = ['id', 'name', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at', 'is_available',
-                  'primary_price', 'secondary_price']
+                  'primary_price', 'secondary_price',
+                  'primary_price_with_discount', 'secondary_price_with_discount']
 
     def _get_business_profile(self, obj):
         request = self.context.get('request')
@@ -299,23 +303,61 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
             return request.user.business_profile
         return getattr(obj, 'business', None)
 
+    def _get_amounts(self, obj):
+        """Memoized get_primary_secondary_amounts(bp) per object.
+
+        This serializer is reused across every product in a list (ListSerializer
+        calls the same child instance per item), and primary/secondary/discounted
+        price fields each need this same tuple — cache it per-pk to avoid redoing
+        the Decimal arithmetic and business-profile lookup once per field.
+        """
+        cache = self.context.setdefault('_amounts_cache', {})
+        if obj.pk not in cache:
+            bp = self._get_business_profile(obj)
+            cache[obj.pk] = obj.get_primary_secondary_amounts(bp) if bp else (None, None, None, None)
+        return cache[obj.pk]
+
     def get_primary_price(self, obj):
-        bp = self._get_business_profile(obj)
-        if not bp:
-            return None
-        primary_amount, _, primary_currency, _ = obj.get_primary_secondary_amounts(bp)
+        primary_amount, _, primary_currency, _ = self._get_amounts(obj)
         if primary_amount is None or primary_currency is None:
             return None
         return self._format_currency_amount(primary_amount, primary_currency.code)
 
     def get_secondary_price(self, obj):
-        bp = self._get_business_profile(obj)
-        if not bp:
-            return None
-        _, secondary_amount, _, secondary_currency = obj.get_primary_secondary_amounts(bp)
+        _, secondary_amount, _, secondary_currency = self._get_amounts(obj)
         if secondary_amount is None or secondary_currency is None:
             return None
         return self._format_currency_amount(secondary_amount, secondary_currency.code)
+
+    def _get_discounted_amounts(self, obj):
+        primary_amount, secondary_amount, primary_currency, secondary_currency = self._get_amounts(obj)
+        if primary_amount is None or primary_currency is None:
+            return None, None, None, None
+
+        percent = self._get_effective_discount_percentage(obj)
+        if not percent or percent <= 0:
+            return None, None, primary_currency, secondary_currency
+
+        if percent < 0:
+            percent = Decimal('0')
+        if percent > Decimal('100'):
+            percent = Decimal('100')
+
+        factor = (Decimal('100') - percent) / Decimal('100')
+
+        try:
+            discounted_primary = primary_amount * factor
+        except Exception:
+            discounted_primary = None
+
+        discounted_secondary = None
+        if secondary_amount is not None:
+            try:
+                discounted_secondary = secondary_amount * factor
+            except Exception:
+                discounted_secondary = None
+
+        return discounted_primary, discounted_secondary, primary_currency, secondary_currency
 
     def get_isFavorite(self, obj):
         return obj.stopper == 'FAVORITE'

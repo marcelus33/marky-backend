@@ -1,7 +1,9 @@
 from decimal import Decimal
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from business.models import BusinessProfile
+
+DISCOUNT_PERCENTAGE_VALIDATORS = [MinValueValidator(Decimal('0')), MaxValueValidator(Decimal('100'))]
 
 
 class MultiBuyType(models.TextChoices):
@@ -22,7 +24,9 @@ class ProductCategory(models.Model):
         blank=True,
         help_text="Oferta tipo 2x1, 3x2, etc."
     )
-    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0, validators=DISCOUNT_PERCENTAGE_VALIDATORS
+    )
     promotion_starts_at = models.DateTimeField(null=True, blank=True)
     promotion_ends_at = models.DateTimeField(null=True, blank=True)
     is_available = models.BooleanField(default=True)
@@ -64,7 +68,9 @@ class Product(models.Model):
         blank=True,
         help_text="Oferta tipo 2x1, 3x2, etc."
     )
-    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0, validators=DISCOUNT_PERCENTAGE_VALIDATORS
+    )
     promotion_starts_at = models.DateTimeField(null=True, blank=True)
     promotion_ends_at = models.DateTimeField(null=True, blank=True)
     #
