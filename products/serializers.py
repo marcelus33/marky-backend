@@ -517,22 +517,43 @@ class ProductInputSerializer(serializers.ModelSerializer):
 
         return super().to_internal_value(data)
 
+    STOPPER_CONFLICT_LABELS = {
+        'FAVORITE': 'Favorito del mes',
+        'RECOMMENDED': 'Recomendado',
+    }
+
+    def _stopper_conflict(self, stopper, category, exclude_pk=None):
+        """Return the Product already holding `stopper` in `category`, or None.
+
+        Shared by the proactive validate() check and the IntegrityError
+        backstops in create()/update(): after a race loses to the DB
+        constraint, re-querying (rather than trusting the caller's stopper
+        value alone) confirms it really was a stopper conflict — not some
+        unrelated IntegrityError — without relying on parsing the driver's
+        error message, which differs between Postgres and SQLite.
+        """
+        label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+        if label is None or category is None:
+            return None
+        conflicting = Product.objects.filter(category=category, stopper=stopper)
+        if exclude_pk is not None:
+            conflicting = conflicting.exclude(pk=exclude_pk)
+        return conflicting.first()
+
     def validate(self, attrs):
         stopper = attrs.get('stopper', getattr(self.instance, 'stopper', None))
         category = attrs.get('category', getattr(self.instance, 'category', None))
 
-        if stopper == 'FAVORITE' and category is not None:
-            conflicting = Product.objects.filter(category=category, stopper='FAVORITE')
-            if self.instance is not None:
-                conflicting = conflicting.exclude(pk=self.instance.pk)
-            existing = conflicting.first()
-            if existing is not None:
-                raise serializers.ValidationError({
-                    'error': (
-                        f'"{existing.name}" ya es el Favorito del mes en esta categoría. '
-                        'Quita esa etiqueta antes de asignarla a otro producto.'
-                    )
-                })
+        existing = self._stopper_conflict(
+            stopper, category, exclude_pk=self.instance.pk if self.instance is not None else None
+        )
+        if existing is not None:
+            raise serializers.ValidationError({
+                'error': (
+                    f'"{existing.name}" ya es el {self.STOPPER_CONFLICT_LABELS[stopper]} en esta categoría. '
+                    'Quita esa etiqueta antes de asignarla a otro producto.'
+                )
+            })
 
         return attrs
 
@@ -546,14 +567,23 @@ class ProductInputSerializer(serializers.ModelSerializer):
         validated_data.pop('countdown_active', None)
 
         try:
-            product = Product.objects.create(**validated_data)
+            # Nested atomic = savepoint: on IntegrityError, only this insert
+            # rolls back, leaving the outer transaction usable so the
+            # conflict re-check below can still query the DB.
+            with transaction.atomic():
+                product = Product.objects.create(**validated_data)
         except IntegrityError:
-            raise serializers.ValidationError({
-                'error': (
-                    'Ya existe un Favorito del mes en esta categoría. '
-                    'Quita esa etiqueta antes de asignarla a otro producto.'
-                )
-            })
+            stopper = validated_data.get('stopper')
+            category = validated_data.get('category')
+            label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+            if label is not None and self._stopper_conflict(stopper, category) is not None:
+                raise serializers.ValidationError({
+                    'error': (
+                        f'Ya existe un {label} en esta categoría. '
+                        'Quita esa etiqueta antes de asignarla a otro producto.'
+                    )
+                })
+            raise
 
         for variant_data in variants_data:
             if '_delete' in variant_data:
@@ -581,7 +611,21 @@ class ProductInputSerializer(serializers.ModelSerializer):
         validated_data.pop('promotion_option', None)
         validated_data.pop('countdown_active', None)
 
-        instance = super().update(instance, validated_data)
+        try:
+            with transaction.atomic():
+                instance = super().update(instance, validated_data)
+        except IntegrityError:
+            stopper = validated_data.get('stopper', instance.stopper)
+            category = validated_data.get('category', instance.category)
+            label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+            if label is not None and self._stopper_conflict(stopper, category, exclude_pk=instance.pk) is not None:
+                raise serializers.ValidationError({
+                    'error': (
+                        f'Ya existe un {label} en esta categoría. '
+                        'Quita esa etiqueta antes de asignarla a otro producto.'
+                    )
+                })
+            raise
 
         # Helper to process related objects generically
         def process_related(model_class, existing_qs, items_data, create_fields_map=None):

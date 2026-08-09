@@ -83,6 +83,11 @@ class Product(models.Model):
                 condition=models.Q(stopper='FAVORITE'),
                 name='unique_favorite_stopper_per_category',
             ),
+            models.UniqueConstraint(
+                fields=['category'],
+                condition=models.Q(stopper='RECOMMENDED'),
+                name='unique_recommended_stopper_per_category',
+            ),
         ]
 
     def __str__(self):

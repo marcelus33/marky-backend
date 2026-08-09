@@ -499,3 +499,163 @@ class TestProductFavoriteStopperConstraint(MarkyAPITestCase):
                 'name': 'Second Favorite', 'description': 'Desc', 'price': Decimal('20.00'),
                 'business': self.profile, 'category': self.category, 'stopper': 'FAVORITE',
             })
+
+
+class TestProductRecommendedStopperConstraint(MarkyAPITestCase):
+    """DB-level backstop for the RECOMMENDED-per-category uniqueness rule.
+
+    Mirrors TestProductFavoriteStopperConstraint: the serializer's
+    read-then-write check has a TOCTOU gap under concurrent requests; a DB
+    constraint guarantees the invariant regardless of races.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('recommended_tenant', 'recommended_tenant@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_second_recommended_in_same_category_raises_integrity_error(self):
+        from django.db import IntegrityError
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        with self.assertRaises(IntegrityError):
+            Product.objects.create(
+                name='Second Recommended', description='Desc', price=Decimal('20.00'),
+                business=self.profile, category=self.category, stopper='RECOMMENDED',
+            )
+
+    def test_multiple_non_recommended_products_allowed_in_same_category(self):
+        Product.objects.create(
+            name='Regular 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+        Product.objects.create(
+            name='Regular 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category,
+        )
+        self.assertEqual(Product.objects.filter(category=self.category).count(), 2)
+
+    def test_recommended_allowed_in_different_categories(self):
+        other_category = ProductCategory.objects.create(business=self.profile, name='Other', icon='icon')
+        Product.objects.create(
+            name='Recommended 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        Product.objects.create(
+            name='Recommended 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=other_category, stopper='RECOMMENDED',
+        )
+        self.assertEqual(Product.objects.filter(stopper='RECOMMENDED').count(), 2)
+
+    def test_favorite_and_recommended_can_coexist_in_same_category(self):
+        """The stopper field itself already prevents a product from being both
+        FAVORITE and RECOMMENDED at once; this confirms the two constraints
+        don't interfere with each other when different products in the same
+        category hold different stopper values."""
+        Product.objects.create(
+            name='The Favorite', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='FAVORITE',
+        )
+        Product.objects.create(
+            name='The Recommended', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        self.assertEqual(Product.objects.filter(category=self.category).count(), 2)
+
+    def test_race_past_serializer_check_still_returns_validation_error_not_500(self):
+        """Simulate the TOCTOU window: two requests both pass validate() because
+        neither commit is visible to the other yet, so the DB constraint is the
+        only thing standing between them. The second create() call should turn
+        the resulting IntegrityError into a clean DRF ValidationError, not a 500.
+        """
+        from products.serializers import ProductInputSerializer
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+
+        serializer = ProductInputSerializer()
+        with self.assertRaises(serializers.ValidationError):
+            serializer.create({
+                'name': 'Second Recommended', 'description': 'Desc', 'price': Decimal('20.00'),
+                'business': self.profile, 'category': self.category, 'stopper': 'RECOMMENDED',
+            })
+
+
+class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):
+    """update()'s IntegrityError backstop (previously missing entirely — only
+    create() had one) and the disambiguation that keeps an unrelated
+    IntegrityError from being mislabeled as a stopper conflict in either
+    method.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('backstop_tenant', 'backstop_tenant@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_update_race_past_serializer_check_still_returns_validation_error_not_500(self):
+        """Mirrors the equivalent create() race test: two updates both pass
+        validate() before either commits, so the DB constraint is the only
+        thing standing between them. update() must turn the resulting
+        IntegrityError into a clean ValidationError, not a 500.
+        """
+        from products.serializers import ProductInputSerializer
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        other = Product.objects.create(
+            name='Not Recommended Yet', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category,
+        )
+
+        serializer = ProductInputSerializer()
+        with self.assertRaises(serializers.ValidationError):
+            serializer.update(other, {'stopper': 'RECOMMENDED'})
+
+    def test_create_unrelated_integrity_error_is_not_mislabeled_as_stopper_conflict(self):
+        """If create() hits an IntegrityError that isn't actually a stopper
+        conflict (e.g. a concurrently-deleted category causing an FK
+        violation), it must propagate as-is rather than being reported as a
+        fake 'Ya existe un Recomendado...' conflict."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        from products.serializers import ProductInputSerializer
+
+        serializer = ProductInputSerializer()
+        with patch(
+            'products.serializers.Product.objects.create',
+            side_effect=IntegrityError('unrelated constraint violation'),
+        ):
+            with self.assertRaises(IntegrityError):
+                serializer.create({
+                    'name': 'X', 'description': 'Desc', 'price': Decimal('10.00'),
+                    'business': self.profile, 'category': self.category, 'stopper': 'RECOMMENDED',
+                })
+
+    def test_update_unrelated_integrity_error_is_not_mislabeled_as_stopper_conflict(self):
+        """Same guarantee as above, for update()."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        from products.serializers import ProductInputSerializer
+
+        product = Product.objects.create(
+            name='X', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+
+        serializer = ProductInputSerializer()
+        with patch(
+            'products.models.Product.save',
+            side_effect=IntegrityError('unrelated constraint violation'),
+        ):
+            with self.assertRaises(IntegrityError):
+                serializer.update(product, {'name': 'Y'})
