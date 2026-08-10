@@ -3,6 +3,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import serializers
@@ -10,6 +12,7 @@ from rest_framework import serializers
 from utils.tests_base import MarkyAPITestCase
 from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
+from products.validators import validate_media_extension, validate_media_size
 
 User = get_user_model()
 
@@ -585,6 +588,94 @@ class TestProductRecommendedStopperConstraint(MarkyAPITestCase):
                 'name': 'Second Recommended', 'description': 'Desc', 'price': Decimal('20.00'),
                 'business': self.profile, 'category': self.category, 'stopper': 'RECOMMENDED',
             })
+
+
+class TestProductMediaValidators(SimpleTestCase):
+
+    def test_oversized_image_rejected(self):
+        f = SimpleUploadedFile('photo.jpg', b'x' * (5 * 1024 * 1024 + 1), content_type='image/jpeg')
+        with self.assertRaises(ValidationError):
+            validate_media_size(f)
+
+    def test_image_at_exactly_max_size_accepted(self):
+        f = SimpleUploadedFile('photo.jpg', b'x' * (5 * 1024 * 1024), content_type='image/jpeg')
+        validate_media_size(f)  # should not raise
+
+    def test_oversized_video_rejected(self):
+        f = SimpleUploadedFile('clip.mp4', b'x' * (80 * 1024 * 1024 + 1), content_type='video/mp4')
+        with self.assertRaises(ValidationError):
+            validate_media_size(f)
+
+    def test_video_at_exactly_max_size_accepted(self):
+        f = SimpleUploadedFile('clip.mp4', b'x' * (80 * 1024 * 1024), content_type='video/mp4')
+        validate_media_size(f)  # should not raise
+
+    def test_small_video_not_held_to_image_limit(self):
+        # A 6MB video is over the image cap but well under the video cap —
+        # confirms size limits are chosen by extension, not a single shared cap.
+        f = SimpleUploadedFile('clip.webm', b'x' * (6 * 1024 * 1024), content_type='video/webm')
+        validate_media_size(f)  # should not raise
+
+    def test_disallowed_extension_rejected(self):
+        f = SimpleUploadedFile('malware.exe', b'x', content_type='application/octet-stream')
+        with self.assertRaises(ValidationError):
+            validate_media_extension(f)
+
+    def test_disallowed_video_extension_rejected(self):
+        f = SimpleUploadedFile('clip.avi', b'x', content_type='video/x-msvideo')
+        with self.assertRaises(ValidationError):
+            validate_media_extension(f)
+
+    def test_each_allowed_extension_accepted(self):
+        for ext, content_type in [
+            ('.jpg', 'image/jpeg'), ('.jpeg', 'image/jpeg'), ('.png', 'image/png'),
+            ('.webp', 'image/webp'), ('.mp4', 'video/mp4'), ('.mov', 'video/quicktime'),
+            ('.webm', 'video/webm'),
+        ]:
+            f = SimpleUploadedFile(f'file{ext}', b'x', content_type=content_type)
+            validate_media_extension(f)  # should not raise
+
+
+class TestProductMediaUploadAPI(MarkyAPITestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('media_tenant', 'media_tenant@test.com')
+
+    def _create_payload(self, file_):
+        return {
+            'name': 'Product With Media', 'description': 'Desc', 'price': '10.00',
+            'media[0][file]': file_, 'media[0][media_type]': 'image', 'media[0][order]': '0',
+        }
+
+    def test_oversized_image_rejected_by_api(self):
+        client = self.auth_client(self.user)
+        big_file = SimpleUploadedFile(
+            'photo.jpg', b'x' * (5 * 1024 * 1024 + 1), content_type='image/jpeg',
+        )
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(big_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Media').exists())
+
+    def test_disallowed_extension_rejected_by_api(self):
+        client = self.auth_client(self.user)
+        bad_file = SimpleUploadedFile('malware.exe', b'x', content_type='application/octet-stream')
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(bad_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Media').exists())
+
+    def test_valid_image_accepted_by_api(self):
+        client = self.auth_client(self.user)
+        good_file = SimpleUploadedFile('photo.jpg', b'x' * 1024, content_type='image/jpeg')
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(good_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
 
 
 class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):

@@ -4,6 +4,7 @@ from django.utils import timezone
 from decimal import Decimal
 
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
+from .validators import validate_media_extension, validate_media_size
 
 # Currencies conventionally quoted without cents (mirrors ISO 4217 zero-decimal
 # currencies relevant to Marky's markets, e.g. Guaraní Paraguayo).
@@ -180,7 +181,11 @@ class ProductMediaSerializer(serializers.ModelSerializer):
 
 class ProductMediaInputSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
-    file = serializers.FileField(required=False, allow_null=True)
+    file = serializers.FileField(
+        required=False,
+        allow_null=True,
+        validators=[validate_media_extension, validate_media_size],
+    )
     _delete = serializers.BooleanField(required=False, default=False)
 
     class Meta:
