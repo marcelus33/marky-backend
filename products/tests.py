@@ -3,6 +3,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import serializers
@@ -10,6 +12,7 @@ from rest_framework import serializers
 from utils.tests_base import MarkyAPITestCase
 from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
+from products.validators import validate_media_extension, validate_media_size
 
 User = get_user_model()
 
@@ -499,3 +502,251 @@ class TestProductFavoriteStopperConstraint(MarkyAPITestCase):
                 'name': 'Second Favorite', 'description': 'Desc', 'price': Decimal('20.00'),
                 'business': self.profile, 'category': self.category, 'stopper': 'FAVORITE',
             })
+
+
+class TestProductRecommendedStopperConstraint(MarkyAPITestCase):
+    """DB-level backstop for the RECOMMENDED-per-category uniqueness rule.
+
+    Mirrors TestProductFavoriteStopperConstraint: the serializer's
+    read-then-write check has a TOCTOU gap under concurrent requests; a DB
+    constraint guarantees the invariant regardless of races.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('recommended_tenant', 'recommended_tenant@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_second_recommended_in_same_category_raises_integrity_error(self):
+        from django.db import IntegrityError
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        with self.assertRaises(IntegrityError):
+            Product.objects.create(
+                name='Second Recommended', description='Desc', price=Decimal('20.00'),
+                business=self.profile, category=self.category, stopper='RECOMMENDED',
+            )
+
+    def test_multiple_non_recommended_products_allowed_in_same_category(self):
+        Product.objects.create(
+            name='Regular 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+        Product.objects.create(
+            name='Regular 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category,
+        )
+        self.assertEqual(Product.objects.filter(category=self.category).count(), 2)
+
+    def test_recommended_allowed_in_different_categories(self):
+        other_category = ProductCategory.objects.create(business=self.profile, name='Other', icon='icon')
+        Product.objects.create(
+            name='Recommended 1', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        Product.objects.create(
+            name='Recommended 2', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=other_category, stopper='RECOMMENDED',
+        )
+        self.assertEqual(Product.objects.filter(stopper='RECOMMENDED').count(), 2)
+
+    def test_favorite_and_recommended_can_coexist_in_same_category(self):
+        """The stopper field itself already prevents a product from being both
+        FAVORITE and RECOMMENDED at once; this confirms the two constraints
+        don't interfere with each other when different products in the same
+        category hold different stopper values."""
+        Product.objects.create(
+            name='The Favorite', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='FAVORITE',
+        )
+        Product.objects.create(
+            name='The Recommended', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        self.assertEqual(Product.objects.filter(category=self.category).count(), 2)
+
+    def test_race_past_serializer_check_still_returns_validation_error_not_500(self):
+        """Simulate the TOCTOU window: two requests both pass validate() because
+        neither commit is visible to the other yet, so the DB constraint is the
+        only thing standing between them. The second create() call should turn
+        the resulting IntegrityError into a clean DRF ValidationError, not a 500.
+        """
+        from products.serializers import ProductInputSerializer
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+
+        serializer = ProductInputSerializer()
+        with self.assertRaises(serializers.ValidationError):
+            serializer.create({
+                'name': 'Second Recommended', 'description': 'Desc', 'price': Decimal('20.00'),
+                'business': self.profile, 'category': self.category, 'stopper': 'RECOMMENDED',
+            })
+
+
+class TestProductMediaValidators(SimpleTestCase):
+
+    def test_oversized_image_rejected(self):
+        f = SimpleUploadedFile('photo.jpg', b'x' * (5 * 1024 * 1024 + 1), content_type='image/jpeg')
+        with self.assertRaises(ValidationError):
+            validate_media_size(f)
+
+    def test_image_at_exactly_max_size_accepted(self):
+        f = SimpleUploadedFile('photo.jpg', b'x' * (5 * 1024 * 1024), content_type='image/jpeg')
+        validate_media_size(f)  # should not raise
+
+    def test_oversized_video_rejected(self):
+        f = SimpleUploadedFile('clip.mp4', b'x' * (80 * 1024 * 1024 + 1), content_type='video/mp4')
+        with self.assertRaises(ValidationError):
+            validate_media_size(f)
+
+    def test_video_at_exactly_max_size_accepted(self):
+        f = SimpleUploadedFile('clip.mp4', b'x' * (80 * 1024 * 1024), content_type='video/mp4')
+        validate_media_size(f)  # should not raise
+
+    def test_small_video_not_held_to_image_limit(self):
+        # A 6MB video is over the image cap but well under the video cap —
+        # confirms size limits are chosen by extension, not a single shared cap.
+        f = SimpleUploadedFile('clip.webm', b'x' * (6 * 1024 * 1024), content_type='video/webm')
+        validate_media_size(f)  # should not raise
+
+    def test_disallowed_extension_rejected(self):
+        f = SimpleUploadedFile('malware.exe', b'x', content_type='application/octet-stream')
+        with self.assertRaises(ValidationError):
+            validate_media_extension(f)
+
+    def test_disallowed_video_extension_rejected(self):
+        f = SimpleUploadedFile('clip.avi', b'x', content_type='video/x-msvideo')
+        with self.assertRaises(ValidationError):
+            validate_media_extension(f)
+
+    def test_each_allowed_extension_accepted(self):
+        for ext, content_type in [
+            ('.jpg', 'image/jpeg'), ('.jpeg', 'image/jpeg'), ('.png', 'image/png'),
+            ('.webp', 'image/webp'), ('.mp4', 'video/mp4'), ('.mov', 'video/quicktime'),
+            ('.webm', 'video/webm'),
+        ]:
+            f = SimpleUploadedFile(f'file{ext}', b'x', content_type=content_type)
+            validate_media_extension(f)  # should not raise
+
+
+class TestProductMediaUploadAPI(MarkyAPITestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('media_tenant', 'media_tenant@test.com')
+
+    def _create_payload(self, file_):
+        return {
+            'name': 'Product With Media', 'description': 'Desc', 'price': '10.00',
+            'media[0][file]': file_, 'media[0][media_type]': 'image', 'media[0][order]': '0',
+        }
+
+    def test_oversized_image_rejected_by_api(self):
+        client = self.auth_client(self.user)
+        big_file = SimpleUploadedFile(
+            'photo.jpg', b'x' * (5 * 1024 * 1024 + 1), content_type='image/jpeg',
+        )
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(big_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Media').exists())
+
+    def test_disallowed_extension_rejected_by_api(self):
+        client = self.auth_client(self.user)
+        bad_file = SimpleUploadedFile('malware.exe', b'x', content_type='application/octet-stream')
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(bad_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Media').exists())
+
+    def test_valid_image_accepted_by_api(self):
+        client = self.auth_client(self.user)
+        good_file = SimpleUploadedFile('photo.jpg', b'x' * 1024, content_type='image/jpeg')
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(good_file), format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
+
+
+class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):
+    """update()'s IntegrityError backstop (previously missing entirely — only
+    create() had one) and the disambiguation that keeps an unrelated
+    IntegrityError from being mislabeled as a stopper conflict in either
+    method.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('backstop_tenant', 'backstop_tenant@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_update_race_past_serializer_check_still_returns_validation_error_not_500(self):
+        """Mirrors the equivalent create() race test: two updates both pass
+        validate() before either commits, so the DB constraint is the only
+        thing standing between them. update() must turn the resulting
+        IntegrityError into a clean ValidationError, not a 500.
+        """
+        from products.serializers import ProductInputSerializer
+
+        Product.objects.create(
+            name='First Recommended', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, stopper='RECOMMENDED',
+        )
+        other = Product.objects.create(
+            name='Not Recommended Yet', description='Desc', price=Decimal('20.00'),
+            business=self.profile, category=self.category,
+        )
+
+        serializer = ProductInputSerializer()
+        with self.assertRaises(serializers.ValidationError):
+            serializer.update(other, {'stopper': 'RECOMMENDED'})
+
+    def test_create_unrelated_integrity_error_is_not_mislabeled_as_stopper_conflict(self):
+        """If create() hits an IntegrityError that isn't actually a stopper
+        conflict (e.g. a concurrently-deleted category causing an FK
+        violation), it must propagate as-is rather than being reported as a
+        fake 'Ya existe un Recomendado...' conflict."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        from products.serializers import ProductInputSerializer
+
+        serializer = ProductInputSerializer()
+        with patch(
+            'products.serializers.Product.objects.create',
+            side_effect=IntegrityError('unrelated constraint violation'),
+        ):
+            with self.assertRaises(IntegrityError):
+                serializer.create({
+                    'name': 'X', 'description': 'Desc', 'price': Decimal('10.00'),
+                    'business': self.profile, 'category': self.category, 'stopper': 'RECOMMENDED',
+                })
+
+    def test_update_unrelated_integrity_error_is_not_mislabeled_as_stopper_conflict(self):
+        """Same guarantee as above, for update()."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        from products.serializers import ProductInputSerializer
+
+        product = Product.objects.create(
+            name='X', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+
+        serializer = ProductInputSerializer()
+        with patch(
+            'products.models.Product.save',
+            side_effect=IntegrityError('unrelated constraint violation'),
+        ):
+            with self.assertRaises(IntegrityError):
+                serializer.update(product, {'name': 'Y'})

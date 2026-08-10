@@ -1,5 +1,9 @@
+from decimal import Decimal
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from business.models import BusinessProfile
+
+DISCOUNT_PERCENTAGE_VALIDATORS = [MinValueValidator(Decimal('0')), MaxValueValidator(Decimal('100'))]
 
 
 class MultiBuyType(models.TextChoices):
@@ -20,7 +24,9 @@ class ProductCategory(models.Model):
         blank=True,
         help_text="Oferta tipo 2x1, 3x2, etc."
     )
-    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0, validators=DISCOUNT_PERCENTAGE_VALIDATORS
+    )
     promotion_starts_at = models.DateTimeField(null=True, blank=True)
     promotion_ends_at = models.DateTimeField(null=True, blank=True)
     is_available = models.BooleanField(default=True)
@@ -42,7 +48,7 @@ class Product(models.Model):
 
     name = models.CharField(max_length=255)
     description = models.TextField()
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE,
                                  related_name='products', null=True, blank=True)
     is_active = models.BooleanField(default=True) ## hidden or visible
@@ -62,7 +68,9 @@ class Product(models.Model):
         blank=True,
         help_text="Oferta tipo 2x1, 3x2, etc."
     )
-    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0, validators=DISCOUNT_PERCENTAGE_VALIDATORS
+    )
     promotion_starts_at = models.DateTimeField(null=True, blank=True)
     promotion_ends_at = models.DateTimeField(null=True, blank=True)
     #
@@ -74,6 +82,11 @@ class Product(models.Model):
                 fields=['category'],
                 condition=models.Q(stopper='FAVORITE'),
                 name='unique_favorite_stopper_per_category',
+            ),
+            models.UniqueConstraint(
+                fields=['category'],
+                condition=models.Q(stopper='RECOMMENDED'),
+                name='unique_recommended_stopper_per_category',
             ),
         ]
 
@@ -123,7 +136,7 @@ class Product(models.Model):
 class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
     name = models.CharField(max_length=255)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     description = models.TextField(blank=True, null=True)
     image = models.ImageField(upload_to='product_variants/', blank=True, null=True)
 
@@ -168,7 +181,7 @@ class ProductVariant(models.Model):
 class ProductAddon(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='addons')
     name = models.CharField(max_length=255)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
 
     def __str__(self):
         return f'{self.product.name} - {self.name}'

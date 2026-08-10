@@ -4,6 +4,46 @@ from django.utils import timezone
 from decimal import Decimal
 
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
+from .validators import validate_media_extension, validate_media_size
+
+# Currencies conventionally quoted without cents (mirrors ISO 4217 zero-decimal
+# currencies relevant to Marky's markets, e.g. Guaraní Paraguayo).
+ZERO_DECIMAL_CURRENCY_CODES = {'PYG'}
+
+
+def format_currency_amount(amount, code):
+    """Format a Decimal amount consistently for display, e.g. 'USD 1.000.000,00' or 'PYG 150.000'.
+
+    Decimal places are currency-aware: zero-decimal currencies (see
+    ZERO_DECIMAL_CURRENCY_CODES) are shown without cents, everything else
+    with exactly 2. Thousands are dot-separated, decimals comma-separated
+    (LATAM/Spanish formatting), matching how price inputs are normalized.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+
+    if amount is None:
+        return None
+
+    if not isinstance(amount, Decimal):
+        try:
+            amount = Decimal(str(amount))
+        except Exception:
+            return None
+
+    decimal_places = 0 if code in ZERO_DECIMAL_CURRENCY_CODES else 2
+    quantum = Decimal('1') if decimal_places == 0 else Decimal('0.01')
+    quantized = amount.quantize(quantum, rounding=ROUND_HALF_UP)
+
+    if decimal_places == 0:
+        integer_with_commas = f"{int(quantized):,}"
+        integer_with_dots = integer_with_commas.replace(',', '.')
+        return f"{code} {integer_with_dots}"
+
+    s = f"{quantized:.2f}"
+    integer_part, decimal_part = s.split('.')
+    integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
+    integer_with_dots = integer_with_commas.replace(',', '.')
+    return f"{code} {integer_with_dots},{decimal_part}"
 
 
 class ProductPriceMixin:
@@ -29,25 +69,7 @@ class ProductPriceMixin:
         return None
 
     def _format_currency_amount(self, amount, code):
-        """Format Decimal amount like: 'USD 1.000.000,00'"""
-        from decimal import Decimal, ROUND_HALF_UP
-
-        if amount is None:
-            return None
-
-        if not isinstance(amount, Decimal):
-            try:
-                amount = Decimal(str(amount))
-            except Exception:
-                return None
-
-        quantized = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        # Use grouping with commas then convert to dots for thousands and comma for decimals
-        s = f"{quantized:.2f}"
-        integer_part, decimal_part = s.split('.')
-        integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
-        integer_with_dots = integer_with_commas.replace(',', '.')
-        return f"{code} {integer_with_dots},{decimal_part}"
+        return format_currency_amount(amount, code)
 
     def _is_date_range_active(self, start, end):
         """Return True if the date range is considered active for now.
@@ -159,7 +181,11 @@ class ProductMediaSerializer(serializers.ModelSerializer):
 
 class ProductMediaInputSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
-    file = serializers.FileField(required=False, allow_null=True)
+    file = serializers.FileField(
+        required=False,
+        allow_null=True,
+        validators=[validate_media_extension, validate_media_size],
+    )
     _delete = serializers.BooleanField(required=False, default=False)
 
     class Meta:
@@ -263,6 +289,9 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     discount_percentage = serializers.SerializerMethodField()
     primary_price = serializers.SerializerMethodField()
     secondary_price = serializers.SerializerMethodField()
+    # Human-readable discounted prices (None when there is no active percentage discount)
+    primary_price_with_discount = serializers.SerializerMethodField()
+    secondary_price_with_discount = serializers.SerializerMethodField()
     # promotion_starts_at = serializers.SerializerMethodField()
     # promotion_ends_at = serializers.SerializerMethodField()
 
@@ -270,7 +299,8 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
         model = Product
         fields = ['id', 'name', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at', 'is_available',
-                  'primary_price', 'secondary_price']
+                  'primary_price', 'secondary_price',
+                  'primary_price_with_discount', 'secondary_price_with_discount']
 
     def _get_business_profile(self, obj):
         request = self.context.get('request')
@@ -278,44 +308,61 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
             return request.user.business_profile
         return getattr(obj, 'business', None)
 
-    def _format_currency_amount(self, amount, code):
-        """Format Decimal amount like: 'USD 1.000.000,00'"""
-        from decimal import Decimal, ROUND_HALF_UP
+    def _get_amounts(self, obj):
+        """Memoized get_primary_secondary_amounts(bp) per object.
 
-        if amount is None:
-            return None
-
-        if not isinstance(amount, Decimal):
-            try:
-                amount = Decimal(str(amount))
-            except Exception:
-                return None
-
-        quantized = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        # Use grouping with commas then convert to dots for thousands and comma for decimals
-        s = f"{quantized:.2f}"
-        integer_part, decimal_part = s.split('.')
-        integer_with_commas = f"{int(integer_part):,}"  # '1,000,000'
-        integer_with_dots = integer_with_commas.replace(',', '.')
-        return f"{code} {integer_with_dots},{decimal_part}"
+        This serializer is reused across every product in a list (ListSerializer
+        calls the same child instance per item), and primary/secondary/discounted
+        price fields each need this same tuple — cache it per-pk to avoid redoing
+        the Decimal arithmetic and business-profile lookup once per field.
+        """
+        cache = self.context.setdefault('_amounts_cache', {})
+        if obj.pk not in cache:
+            bp = self._get_business_profile(obj)
+            cache[obj.pk] = obj.get_primary_secondary_amounts(bp) if bp else (None, None, None, None)
+        return cache[obj.pk]
 
     def get_primary_price(self, obj):
-        bp = self._get_business_profile(obj)
-        if not bp:
-            return None
-        primary_amount, _, primary_currency, _ = obj.get_primary_secondary_amounts(bp)
+        primary_amount, _, primary_currency, _ = self._get_amounts(obj)
         if primary_amount is None or primary_currency is None:
             return None
         return self._format_currency_amount(primary_amount, primary_currency.code)
 
     def get_secondary_price(self, obj):
-        bp = self._get_business_profile(obj)
-        if not bp:
-            return None
-        _, secondary_amount, _, secondary_currency = obj.get_primary_secondary_amounts(bp)
+        _, secondary_amount, _, secondary_currency = self._get_amounts(obj)
         if secondary_amount is None or secondary_currency is None:
             return None
         return self._format_currency_amount(secondary_amount, secondary_currency.code)
+
+    def _get_discounted_amounts(self, obj):
+        primary_amount, secondary_amount, primary_currency, secondary_currency = self._get_amounts(obj)
+        if primary_amount is None or primary_currency is None:
+            return None, None, None, None
+
+        percent = self._get_effective_discount_percentage(obj)
+        if not percent or percent <= 0:
+            return None, None, primary_currency, secondary_currency
+
+        if percent < 0:
+            percent = Decimal('0')
+        if percent > Decimal('100'):
+            percent = Decimal('100')
+
+        factor = (Decimal('100') - percent) / Decimal('100')
+
+        try:
+            discounted_primary = primary_amount * factor
+        except Exception:
+            discounted_primary = None
+
+        discounted_secondary = None
+        if secondary_amount is not None:
+            try:
+                discounted_secondary = secondary_amount * factor
+            except Exception:
+                discounted_secondary = None
+
+        return discounted_primary, discounted_secondary, primary_currency, secondary_currency
 
     def get_isFavorite(self, obj):
         return obj.stopper == 'FAVORITE'
@@ -475,22 +522,43 @@ class ProductInputSerializer(serializers.ModelSerializer):
 
         return super().to_internal_value(data)
 
+    STOPPER_CONFLICT_LABELS = {
+        'FAVORITE': 'Favorito del mes',
+        'RECOMMENDED': 'Recomendado',
+    }
+
+    def _stopper_conflict(self, stopper, category, exclude_pk=None):
+        """Return the Product already holding `stopper` in `category`, or None.
+
+        Shared by the proactive validate() check and the IntegrityError
+        backstops in create()/update(): after a race loses to the DB
+        constraint, re-querying (rather than trusting the caller's stopper
+        value alone) confirms it really was a stopper conflict — not some
+        unrelated IntegrityError — without relying on parsing the driver's
+        error message, which differs between Postgres and SQLite.
+        """
+        label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+        if label is None or category is None:
+            return None
+        conflicting = Product.objects.filter(category=category, stopper=stopper)
+        if exclude_pk is not None:
+            conflicting = conflicting.exclude(pk=exclude_pk)
+        return conflicting.first()
+
     def validate(self, attrs):
         stopper = attrs.get('stopper', getattr(self.instance, 'stopper', None))
         category = attrs.get('category', getattr(self.instance, 'category', None))
 
-        if stopper == 'FAVORITE' and category is not None:
-            conflicting = Product.objects.filter(category=category, stopper='FAVORITE')
-            if self.instance is not None:
-                conflicting = conflicting.exclude(pk=self.instance.pk)
-            existing = conflicting.first()
-            if existing is not None:
-                raise serializers.ValidationError({
-                    'error': (
-                        f'"{existing.name}" ya es el Favorito del mes en esta categoría. '
-                        'Quita esa etiqueta antes de asignarla a otro producto.'
-                    )
-                })
+        existing = self._stopper_conflict(
+            stopper, category, exclude_pk=self.instance.pk if self.instance is not None else None
+        )
+        if existing is not None:
+            raise serializers.ValidationError({
+                'error': (
+                    f'"{existing.name}" ya es el {self.STOPPER_CONFLICT_LABELS[stopper]} en esta categoría. '
+                    'Quita esa etiqueta antes de asignarla a otro producto.'
+                )
+            })
 
         return attrs
 
@@ -504,14 +572,23 @@ class ProductInputSerializer(serializers.ModelSerializer):
         validated_data.pop('countdown_active', None)
 
         try:
-            product = Product.objects.create(**validated_data)
+            # Nested atomic = savepoint: on IntegrityError, only this insert
+            # rolls back, leaving the outer transaction usable so the
+            # conflict re-check below can still query the DB.
+            with transaction.atomic():
+                product = Product.objects.create(**validated_data)
         except IntegrityError:
-            raise serializers.ValidationError({
-                'error': (
-                    'Ya existe un Favorito del mes en esta categoría. '
-                    'Quita esa etiqueta antes de asignarla a otro producto.'
-                )
-            })
+            stopper = validated_data.get('stopper')
+            category = validated_data.get('category')
+            label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+            if label is not None and self._stopper_conflict(stopper, category) is not None:
+                raise serializers.ValidationError({
+                    'error': (
+                        f'Ya existe un {label} en esta categoría. '
+                        'Quita esa etiqueta antes de asignarla a otro producto.'
+                    )
+                })
+            raise
 
         for variant_data in variants_data:
             if '_delete' in variant_data:
@@ -539,7 +616,21 @@ class ProductInputSerializer(serializers.ModelSerializer):
         validated_data.pop('promotion_option', None)
         validated_data.pop('countdown_active', None)
 
-        instance = super().update(instance, validated_data)
+        try:
+            with transaction.atomic():
+                instance = super().update(instance, validated_data)
+        except IntegrityError:
+            stopper = validated_data.get('stopper', instance.stopper)
+            category = validated_data.get('category', instance.category)
+            label = self.STOPPER_CONFLICT_LABELS.get(stopper)
+            if label is not None and self._stopper_conflict(stopper, category, exclude_pk=instance.pk) is not None:
+                raise serializers.ValidationError({
+                    'error': (
+                        f'Ya existe un {label} en esta categoría. '
+                        'Quita esa etiqueta antes de asignarla a otro producto.'
+                    )
+                })
+            raise
 
         # Helper to process related objects generically
         def process_related(model_class, existing_qs, items_data, create_fields_map=None):
