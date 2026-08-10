@@ -208,6 +208,10 @@ CORS_ALLOWED_ORIGINS = [
     'http://0.0.0.0:3000',
 ] + env.list("CORS_ALLOWED_ORIGINS", default=[])
 
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://marky-admin.*\.vercel\.app$",
+] + env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[])
+
 CORS_EXPOSE_HEADERS = [
     'content-disposition',
 ]
