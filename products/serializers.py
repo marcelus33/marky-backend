@@ -560,6 +560,30 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 )
             })
 
+        # media is the full desired gallery state (existing items kept/updated,
+        # new items, and items flagged `_delete`); when omitted entirely
+        # (e.g. a PATCH that doesn't touch the gallery) there's nothing to
+        # check. Images and videos cap independently.
+        media_data = attrs.get('media')
+        if media_data is not None:
+            remaining_media = [item for item in media_data if not item.get('_delete')]
+            image_count = sum(
+                1 for item in remaining_media
+                if item.get('media_type', ProductMedia.IMAGE) == ProductMedia.IMAGE
+            )
+            video_count = sum(
+                1 for item in remaining_media
+                if item.get('media_type') == ProductMedia.VIDEO
+            )
+            if image_count > 3:
+                raise serializers.ValidationError({
+                    'media': 'No se pueden tener más de 3 imágenes en la galería.'
+                })
+            if video_count > 1:
+                raise serializers.ValidationError({
+                    'media': 'No se puede tener más de 1 video en la galería.'
+                })
+
         return attrs
 
     @transaction.atomic
