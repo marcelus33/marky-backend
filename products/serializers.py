@@ -527,6 +527,17 @@ class ProductInputSerializer(serializers.ModelSerializer):
         'RECOMMENDED': 'Recomendado',
     }
 
+    STOPPER_CONFLICT_MESSAGES = {
+        'FAVORITE': (
+            'Esta categoría ya tiene un Favorito del mes. Para mover este producto, '
+            'primero quita esa etiqueta o cambia el favorito actual.'
+        ),
+        'RECOMMENDED': (
+            'Esta categoría ya tiene un Recomendado. Para mover este producto, '
+            'primero quita esa etiqueta o cambia el recomendado actual.'
+        ),
+    }
+
     def _stopper_conflict(self, stopper, category, exclude_pk=None):
         """Return the Product already holding `stopper` in `category`, or None.
 
@@ -554,10 +565,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
         )
         if existing is not None:
             raise serializers.ValidationError({
-                'error': (
-                    f'"{existing.name}" ya es el {self.STOPPER_CONFLICT_LABELS[stopper]} en esta categoría. '
-                    'Quita esa etiqueta antes de asignarla a otro producto.'
-                )
+                'error': self.STOPPER_CONFLICT_MESSAGES[stopper]
             })
 
         # media is the full desired gallery state (existing items kept/updated,
@@ -607,10 +615,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             label = self.STOPPER_CONFLICT_LABELS.get(stopper)
             if label is not None and self._stopper_conflict(stopper, category) is not None:
                 raise serializers.ValidationError({
-                    'error': (
-                        f'Ya existe un {label} en esta categoría. '
-                        'Quita esa etiqueta antes de asignarla a otro producto.'
-                    )
+                    'error': self.STOPPER_CONFLICT_MESSAGES[stopper]
                 })
             raise
 
@@ -649,10 +654,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             label = self.STOPPER_CONFLICT_LABELS.get(stopper)
             if label is not None and self._stopper_conflict(stopper, category, exclude_pk=instance.pk) is not None:
                 raise serializers.ValidationError({
-                    'error': (
-                        f'Ya existe un {label} en esta categoría. '
-                        'Quita esa etiqueta antes de asignarla a otro producto.'
-                    )
+                    'error': self.STOPPER_CONFLICT_MESSAGES[stopper]
                 })
             raise
 
