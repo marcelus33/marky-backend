@@ -10,8 +10,10 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from utils.tests_base import MarkyAPITestCase
+from notifications.models import Notification
 from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
+from products.services import handle_expired_promotions_for_business
 from products.validators import validate_media_extension, validate_media_size
 from products.promotions import (
     compute_promotion_status,
@@ -1038,10 +1040,11 @@ class TestProductInputSerializerPromotion(MarkyAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('promotion_ends_at', response.data)
 
-    def test_expired_promotion_survives_unrelated_update(self):
-        """The 'no auto-teardown' decision: an already-expired promo's
-        config must not be rejected or cleared by an unrelated save — that's
-        ticket #6's job, not #8's."""
+    def test_expired_promotion_auto_cleared_before_unrelated_update_applies(self):
+        """An unrelated save on a product whose promo already expired doesn't
+        reject the request — but the read that locates the object for the
+        update lazily auto-clears the stale promo config first (ticket #8),
+        so the unrelated field change lands on an already-reset product."""
         now = timezone.now()
         product = self._create_promo_product(
             promotion_starts_at=now - timedelta(days=2),
@@ -1055,9 +1058,10 @@ class TestProductInputSerializerPromotion(MarkyAPITestCase):
 
         self.assertEqual(response.status_code, 200)
         product.refresh_from_db()
-        self.assertEqual(product.discount_percentage, Decimal('25.00'))
-        self.assertIsNotNone(product.promotion_starts_at)
-        self.assertIsNotNone(product.promotion_ends_at)
+        self.assertEqual(product.price, Decimal('20.00'))
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
 
 
 class TestPromotionStatusInResponses(MarkyAPITestCase):
@@ -1069,7 +1073,7 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
         super().setUpTestData()
         cls.user, cls.profile = cls.make_user('promo_status_user', 'promo_status@test.com')
 
-    def test_expired_promotion_status_is_expired_but_fields_kept(self):
+    def test_expired_promotion_status_is_expired_and_fields_auto_cleared(self):
         now = timezone.now()
         product = Product.objects.create(
             name='Expired Promo', description='Desc', price=Decimal('10.00'),
@@ -1080,15 +1084,19 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
         )
         client = self.auth_client(self.user)
 
+        # The GET itself triggers the lazy auto-deactivation before the object
+        # is fetched for serialization, so the response already reflects the
+        # cleared, "nothing configured" state.
         response = client.get(f'/api/v1/products/products/{product.id}/')
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['promotion_status'], EXPIRED)
-        # Kept as history — no auto-teardown, that's ticket #6's job.
+        self.assertEqual(response.data['promotion_status'], INACTIVE)
+        # Auto-teardown: expired promo config is wiped back to normal-product state.
         product.refresh_from_db()
-        self.assertEqual(product.discount_percentage, Decimal('30.00'))
-        self.assertIsNotNone(product.promotion_starts_at)
-        self.assertIsNotNone(product.promotion_ends_at)
+        self.assertIsNone(product.multibuy_option)
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
 
     def test_category_promo_active_uses_category_dates_not_product_dates(self):
         now = timezone.now()
@@ -1142,3 +1150,185 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
         [returned_product] = response.data['results'][0]['products']
         self.assertEqual(returned_product['promotion_status'], ACTIVE)
         self.assertEqual(returned_product['discount_percentage'], Decimal('5.00'))
+
+
+class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
+    """Ticket: auto-clear an expired promotion's fields and notify once, for
+    both Product and ProductCategory, triggered lazily off the tenant-scoped
+    read endpoints (no scheduler in this project)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('expiry_user', 'expiry@test.com')
+
+    def _expired_product(self, name='Expired Product', **kwargs):
+        now = timezone.now()
+        return Product.objects.create(
+            name=name, description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+            **kwargs,
+        )
+
+    def _expired_category(self, name='Expired Category', **kwargs):
+        now = timezone.now()
+        return ProductCategory.objects.create(
+            business=self.profile, name=name, icon='icon',
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+            **kwargs,
+        )
+
+    def test_product_promo_cleared_and_notified_on_read(self):
+        product = self._expired_product()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        product.refresh_from_db()
+        self.assertIsNone(product.multibuy_option)
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
+
+        [notification] = Notification.objects.all()
+        self.assertEqual(
+            notification.message, 'La promoción del producto "Expired Product" ha finalizado.',
+        )
+        self.assertEqual(notification.link, f'/product/edit/{product.id}?section=destacar')
+        self.assertIn(self.user, notification.recipients.all())
+
+    def test_product_name_truncated_at_20_chars_in_notification(self):
+        product = self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        notification = Notification.objects.get()
+        self.assertEqual(
+            notification.message,
+            'La promoción del producto "A Very Long Product ..." ha finalizado.',
+        )
+
+    def test_category_promo_cleared_and_notified_on_read(self):
+        category = self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/product-categories/')
+
+        category.refresh_from_db()
+        self.assertIsNone(category.multibuy_option)
+        self.assertEqual(category.discount_percentage, Decimal('0'))
+        self.assertIsNone(category.promotion_starts_at)
+        self.assertIsNone(category.promotion_ends_at)
+
+        [notification] = Notification.objects.all()
+        self.assertEqual(
+            notification.message, 'La promoción de la categoría "Expired Category" ha finalizado.',
+        )
+        self.assertEqual(notification.link, '')
+        self.assertIn(self.user, notification.recipients.all())
+
+    def test_category_read_via_with_products_also_clears(self):
+        category = self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/product-categories/with_products/')
+
+        category.refresh_from_db()
+        self.assertIsNone(category.promotion_ends_at)
+        self.assertEqual(Notification.objects.count(), 1)
+
+    def test_idempotent_across_repeated_reads(self):
+        self._expired_product()
+        self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+        client.get('/api/v1/products/product-categories/')
+        client.get('/api/v1/products/products/')
+        client.get('/api/v1/products/product-categories/')
+
+        self.assertEqual(Notification.objects.count(), 2)
+
+    def test_reconfigured_promotion_that_expires_again_notifies_independently(self):
+        product = self._expired_product()
+        client = self.auth_client(self.user)
+        client.get('/api/v1/products/products/')
+        self.assertEqual(Notification.objects.count(), 1)
+
+        now = timezone.now()
+        product.discount_percentage = Decimal('20.00')
+        product.promotion_starts_at = now - timedelta(days=2)
+        product.promotion_ends_at = now - timedelta(days=1)
+        product.save()
+
+        client.get('/api/v1/products/products/')
+
+        self.assertEqual(Notification.objects.count(), 2)
+        product.refresh_from_db()
+        self.assertIsNone(product.promotion_ends_at)
+
+    def test_tenancy_only_affects_the_requesting_business(self):
+        other_user, other_profile = self.make_user('other_expiry_user', 'other_expiry@test.com')
+        mine = self._expired_product(name='Mine')
+        now = timezone.now()
+        theirs = Product.objects.create(
+            name='Theirs', description='Desc', price=Decimal('10.00'),
+            business=other_profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+
+        client = self.auth_client(self.user)
+        client.get('/api/v1/products/products/')
+
+        mine.refresh_from_db()
+        theirs.refresh_from_db()
+        self.assertIsNone(mine.promotion_ends_at)
+        self.assertIsNotNone(theirs.promotion_ends_at)
+        self.assertEqual(Notification.objects.filter(recipients=other_user).count(), 0)
+
+    def test_future_end_date_untouched(self):
+        now = timezone.now()
+        product = Product.objects.create(
+            name='Future Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_ends_at=now + timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        product.refresh_from_db()
+        self.assertEqual(product.discount_percentage, Decimal('30.00'))
+        self.assertIsNotNone(product.promotion_ends_at)
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_no_promo_configured_untouched(self):
+        product = Product.objects.create(
+            name='Plain Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+        )
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_repeated_service_calls_only_notify_once_per_object(self):
+        """Two back-to-back calls to the service entry point (as would happen
+        from overlapping requests) must only notify once per object — the
+        second call's candidate query no longer matches the already-cleared row."""
+        self._expired_product()
+        now = timezone.now()
+
+        handle_expired_promotions_for_business(self.profile, now=now)
+        handle_expired_promotions_for_business(self.profile, now=now)
+
+        self.assertEqual(Notification.objects.count(), 1)
