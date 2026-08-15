@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'users',
     'business',
     'products',
+    'notifications',
 ]
 
 MIDDLEWARE = [
@@ -218,9 +219,10 @@ CORS_EXPOSE_HEADERS = [
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=90),
     'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
+    # 'token_blacklist' isn't in INSTALLED_APPS, so BLACKLIST_AFTER_ROTATION would be a no-op if True.
+    'BLACKLIST_AFTER_ROTATION': False,
     'UPDATE_LAST_LOGIN': False,
 
     'ALGORITHM': 'HS256',
@@ -290,6 +292,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Business', 'description': 'All API endpoints related to business.'},
         {'name': 'Cities', 'description': 'All API endpoints related to cities & countries.'},
         {'name': 'Products', 'description': 'All API endpoints related to products.'},
+        {'name': 'Notifications', 'description': 'All API endpoints related to notifications.'},
         # Add more tags as needed
     ],
 }

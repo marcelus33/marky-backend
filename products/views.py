@@ -15,8 +15,10 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
+from .promotions import INACTIVE
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product
+from .services import handle_expired_promotions_for_business
 from .serializers import (
     ProductCategoryBasicSerializer,
     ProductCategoryWithProductsSerializer,
@@ -51,6 +53,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     def get_base_queryset(self):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
+            handle_expired_promotions_for_business(user.business_profile)
             return ProductCategory.objects.filter(business=user.business_profile)
         return ProductCategory.objects.none()
 
@@ -152,6 +155,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
                     'discount_percentage': 0,
                     'promotion_starts_at': None,
                     'promotion_ends_at': None,
+                    'promotion_status': INACTIVE,
                     'products': uncategorized_products_serializer.data
                 }
                 serialized_data.append(no_category_data)
@@ -177,6 +181,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
                 'discount_percentage': 0,
                 'promotion_starts_at': None,
                 'promotion_ends_at': None,
+                'promotion_status': INACTIVE,
                 'products': uncategorized_products_serializer.data
             }
             serialized_data.append(no_category_data)
@@ -201,6 +206,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
+            handle_expired_promotions_for_business(user.business_profile)
             return Product.objects.filter(business=user.business_profile)
         return Product.objects.none()
 

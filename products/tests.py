@@ -10,9 +10,19 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from utils.tests_base import MarkyAPITestCase
+from notifications.models import Notification
 from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
+from products.services import handle_expired_promotions_for_business
 from products.validators import validate_media_extension, validate_media_size
+from products.promotions import (
+    compute_promotion_status,
+    resolve_effective_promotion,
+    ACTIVE,
+    SCHEDULED,
+    EXPIRED,
+    INACTIVE,
+)
 
 User = get_user_model()
 
@@ -750,3 +760,575 @@ class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):
         ):
             with self.assertRaises(IntegrityError):
                 serializer.update(product, {'name': 'Y'})
+
+
+# ---------------------------------------------------------------------------
+# Promotion single-source-of-truth (Asana #8) — products/promotions.py and
+# its wiring into ProductInputSerializer / ProductLiteSerializer / ProductSerializer.
+# ---------------------------------------------------------------------------
+
+class TestPromotionStatus(SimpleTestCase):
+    """Pure unit tests for compute_promotion_status — no DB needed."""
+
+    def test_inactive_when_nothing_configured(self):
+        self.assertEqual(
+            compute_promotion_status(None, Decimal('0'), None, None), INACTIVE,
+        )
+
+    def test_active_multibuy_only_no_dates(self):
+        self.assertEqual(
+            compute_promotion_status('2x1', Decimal('0'), None, None), ACTIVE,
+        )
+
+    def test_active_discount_only_no_dates(self):
+        self.assertEqual(
+            compute_promotion_status(None, Decimal('10.00'), None, None), ACTIVE,
+        )
+
+    def test_scheduled_when_start_in_future(self):
+        now = timezone.now()
+        self.assertEqual(
+            compute_promotion_status(None, Decimal('10.00'), now + timedelta(days=1), None, now=now),
+            SCHEDULED,
+        )
+
+    def test_expired_when_end_in_past(self):
+        now = timezone.now()
+        self.assertEqual(
+            compute_promotion_status(None, Decimal('10.00'), None, now - timedelta(days=1), now=now),
+            EXPIRED,
+        )
+
+    def test_active_within_window(self):
+        now = timezone.now()
+        self.assertEqual(
+            compute_promotion_status(
+                None, Decimal('10.00'), now - timedelta(hours=1), now + timedelta(hours=1), now=now,
+            ),
+            ACTIVE,
+        )
+
+    def test_expired_wins_even_if_window_is_otherwise_inverted(self):
+        # Defensive: a passed end date means expired regardless of the start.
+        now = timezone.now()
+        self.assertEqual(
+            compute_promotion_status(
+                None, Decimal('10.00'), now - timedelta(days=2), now - timedelta(days=1), now=now,
+            ),
+            EXPIRED,
+        )
+
+
+class TestResolveEffectivePromotion(SimpleTestCase):
+    """Category-vs-product bundling must never mix a category discount with
+    the product's own dates or vice versa — the ticket's headline root cause."""
+
+    def _category(self, multibuy_option=None, discount_percentage=Decimal('0'), starts_at=None, ends_at=None):
+        return SimpleNamespace(
+            multibuy_option=multibuy_option, discount_percentage=discount_percentage,
+            promotion_starts_at=starts_at, promotion_ends_at=ends_at,
+        )
+
+    def _product(self, category=None, multibuy_option=None, discount_percentage=Decimal('0'),
+                 starts_at=None, ends_at=None):
+        return SimpleNamespace(
+            category=category, multibuy_option=multibuy_option, discount_percentage=discount_percentage,
+            promotion_starts_at=starts_at, promotion_ends_at=ends_at,
+        )
+
+    def test_active_category_promo_wins_over_product(self):
+        now = timezone.now()
+        category = self._category(
+            discount_percentage=Decimal('20.00'),
+            starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
+        )
+        product = self._product(
+            category=category, discount_percentage=Decimal('5.00'),
+            starts_at=now - timedelta(days=10), ends_at=now - timedelta(days=9),
+        )
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'category')
+        self.assertEqual(bundle['status'], ACTIVE)
+        self.assertEqual(bundle['discount_percentage'], Decimal('20.00'))
+        self.assertEqual(bundle['promotion_starts_at'], category.promotion_starts_at)
+        self.assertEqual(bundle['promotion_ends_at'], category.promotion_ends_at)
+
+    def test_expired_category_falls_back_to_products_own_active_promo(self):
+        now = timezone.now()
+        category = self._category(discount_percentage=Decimal('20.00'), ends_at=now - timedelta(days=1))
+        product = self._product(category=category, discount_percentage=Decimal('5.00'))
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['status'], ACTIVE)
+        self.assertEqual(bundle['discount_percentage'], Decimal('5.00'))
+
+    def test_no_category_uses_product_own_bundle(self):
+        product = self._product(category=None, discount_percentage=Decimal('5.00'))
+        bundle = resolve_effective_promotion(product)
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['status'], ACTIVE)
+
+    def test_scheduled_category_still_wins_over_product(self):
+        now = timezone.now()
+        category = self._category(discount_percentage=Decimal('20.00'), starts_at=now + timedelta(days=1))
+        product = self._product(category=category, discount_percentage=Decimal('5.00'))
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'category')
+        self.assertEqual(bundle['status'], SCHEDULED)
+
+    def test_inactive_category_falls_back_to_product(self):
+        category = self._category()  # nothing configured
+        product = self._product(category=category, discount_percentage=Decimal('5.00'))
+
+        bundle = resolve_effective_promotion(product)
+
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['status'], ACTIVE)
+
+
+class TestPromotionStatusFilterConsistency(MarkyAPITestCase):
+    """compute_promotion_status() and filters.py::_promotion_active_q must
+    agree on which window combinations count as 'currently active' — they're
+    independently implemented, and the serializer side already drifted from
+    the filter once (see products/promotions.py's module docstring)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('consistency_user', 'consistency@test.com')
+
+    def test_status_agrees_with_orm_filter_across_date_combinations(self):
+        now = timezone.now()
+        matrix = [
+            ('no_dates', None, None),
+            ('future_start_only', now + timedelta(days=1), None),
+            ('past_start_only', now - timedelta(days=1), None),
+            ('future_end_only', None, now + timedelta(days=1)),
+            ('past_end_only', None, now - timedelta(days=1)),
+            ('within_window', now - timedelta(hours=1), now + timedelta(hours=1)),
+            ('future_window', now + timedelta(days=1), now + timedelta(days=2)),
+            ('past_window', now - timedelta(days=2), now - timedelta(days=1)),
+        ]
+
+        for label, starts_at, ends_at in matrix:
+            with self.subTest(label=label):
+                category = ProductCategory.objects.create(
+                    business=self.profile, name=f'Cat {label}', icon='icon',
+                    discount_percentage=Decimal('10.00'),
+                    promotion_starts_at=starts_at, promotion_ends_at=ends_at,
+                )
+                status = compute_promotion_status(
+                    category.multibuy_option, category.discount_percentage,
+                    category.promotion_starts_at, category.promotion_ends_at, now=now,
+                )
+                matched_by_filter = ProductCategoryFilter(
+                    {'has_promotion': 'true'},
+                    queryset=ProductCategory.objects.filter(pk=category.pk),
+                ).qs.exists()
+
+                # has_promotion=true means "currently benefits from a promo
+                # right now" — a scheduled (future-start) promo correctly
+                # does not match it, so only ACTIVE should agree with the filter.
+                self.assertEqual(
+                    status == ACTIVE, matched_by_filter,
+                    f'{label}: compute_promotion_status={status} but filter matched={matched_by_filter}',
+                )
+
+
+class TestProductInputSerializerPromotion(MarkyAPITestCase):
+    """Regression coverage for the ticket's headline bug: an unrelated-field
+    save must never touch promo config, and an explicit clear must actually
+    clear it (including the multipart empty-string-vs-NULL quirk)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('promo_input_user', 'promo_input@test.com')
+
+    def _create_promo_product(self, **overrides):
+        now = timezone.now()
+        defaults = dict(
+            name='Promo Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('25.00'),
+            promotion_starts_at=now - timedelta(hours=1),
+            promotion_ends_at=now + timedelta(days=1),
+        )
+        defaults.update(overrides)
+        return Product.objects.create(**defaults)
+
+    def test_update_without_promotion_fields_leaves_them_untouched(self):
+        product = self._create_promo_product()
+        starts_at, ends_at = product.promotion_starts_at, product.promotion_ends_at
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/', {'price': '15.00'}, format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.price, Decimal('15.00'))
+        self.assertEqual(product.discount_percentage, Decimal('25.00'))
+        self.assertEqual(product.promotion_starts_at, starts_at)
+        self.assertEqual(product.promotion_ends_at, ends_at)
+
+    def test_multibuy_option_empty_string_normalizes_to_null(self):
+        product = Product.objects.create(
+            name='Multibuy Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile, multibuy_option='2x1',
+        )
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/', {'multibuy_option': ''}, format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertIsNone(product.multibuy_option)
+
+    def test_clearing_dates_via_empty_string_nulls_them(self):
+        product = self._create_promo_product()
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'promotion_starts_at': '', 'promotion_ends_at': ''},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
+
+    def test_promotion_end_before_start_rejected_on_create(self):
+        client = self.auth_client(self.user)
+        now = timezone.now()
+
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'Bad Window', 'description': 'Desc', 'price': '10.00',
+                'discount_percentage': '10.00',
+                'promotion_starts_at': (now + timedelta(days=1)).isoformat(),
+                'promotion_ends_at': now.isoformat(),
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('promotion_ends_at', response.data)
+
+    def test_partial_update_start_only_validates_against_existing_end(self):
+        product = self._create_promo_product()
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'promotion_starts_at': (product.promotion_ends_at + timedelta(days=1)).isoformat()},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('promotion_ends_at', response.data)
+
+    def test_expired_promotion_auto_cleared_before_unrelated_update_applies(self):
+        """An unrelated save on a product whose promo already expired doesn't
+        reject the request — but the read that locates the object for the
+        update lazily auto-clears the stale promo config first (ticket #8),
+        so the unrelated field change lands on an already-reset product."""
+        now = timezone.now()
+        product = self._create_promo_product(
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/', {'price': '20.00'}, format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.price, Decimal('20.00'))
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
+
+
+class TestPromotionStatusInResponses(MarkyAPITestCase):
+    """API-level regression tests for promotion_status and the
+    category-discount-with-product-dates bug (ticket #8's headline symptom)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('promo_status_user', 'promo_status@test.com')
+
+    def test_expired_promotion_status_is_expired_and_fields_auto_cleared(self):
+        now = timezone.now()
+        product = Product.objects.create(
+            name='Expired Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        # The GET itself triggers the lazy auto-deactivation before the object
+        # is fetched for serialization, so the response already reflects the
+        # cleared, "nothing configured" state.
+        response = client.get(f'/api/v1/products/products/{product.id}/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['promotion_status'], INACTIVE)
+        # Auto-teardown: expired promo config is wiped back to normal-product state.
+        product.refresh_from_db()
+        self.assertIsNone(product.multibuy_option)
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
+
+    def test_category_promo_active_uses_category_dates_not_product_dates(self):
+        now = timezone.now()
+        category = ProductCategory.objects.create(
+            business=self.profile, name='Cat Promo', icon='icon',
+            discount_percentage=Decimal('40.00'),
+            promotion_starts_at=now - timedelta(hours=1),
+            promotion_ends_at=now + timedelta(hours=1),
+        )
+        Product.objects.create(
+            name='Inherits Category Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=category,
+            # Product's OWN promo dates are stale/expired — the resolved
+            # dates shown to the card/quick modal must be the category's.
+            discount_percentage=Decimal('5.00'),
+            promotion_starts_at=now - timedelta(days=10),
+            promotion_ends_at=now - timedelta(days=9),
+        )
+        category.refresh_from_db()
+        client = self.auth_client(self.user)
+
+        response = client.get(
+            '/api/v1/products/product-categories/with_products/', {'ids': str(category.id)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        [returned_product] = response.data['results'][0]['products']
+        self.assertEqual(returned_product['promotion_status'], ACTIVE)
+        self.assertEqual(returned_product['discount_percentage'], Decimal('40.00'))
+        self.assertEqual(returned_product['promotion_starts_at'], category.promotion_starts_at)
+        self.assertEqual(returned_product['promotion_ends_at'], category.promotion_ends_at)
+
+    def test_category_expired_falls_back_to_product_own_active_promo(self):
+        now = timezone.now()
+        category = ProductCategory.objects.create(
+            business=self.profile, name='Cat Expired', icon='icon',
+            discount_percentage=Decimal('40.00'),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+        Product.objects.create(
+            name='Own Active Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=category,
+            discount_percentage=Decimal('5.00'),
+        )
+        client = self.auth_client(self.user)
+
+        response = client.get(
+            '/api/v1/products/product-categories/with_products/', {'ids': str(category.id)},
+        )
+
+        [returned_product] = response.data['results'][0]['products']
+        self.assertEqual(returned_product['promotion_status'], ACTIVE)
+        self.assertEqual(returned_product['discount_percentage'], Decimal('5.00'))
+
+
+class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
+    """Ticket: auto-clear an expired promotion's fields and notify once, for
+    both Product and ProductCategory, triggered lazily off the tenant-scoped
+    read endpoints (no scheduler in this project)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('expiry_user', 'expiry@test.com')
+
+    def _expired_product(self, name='Expired Product', **kwargs):
+        now = timezone.now()
+        return Product.objects.create(
+            name=name, description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+            **kwargs,
+        )
+
+    def _expired_category(self, name='Expired Category', **kwargs):
+        now = timezone.now()
+        return ProductCategory.objects.create(
+            business=self.profile, name=name, icon='icon',
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(days=2),
+            promotion_ends_at=now - timedelta(days=1),
+            **kwargs,
+        )
+
+    def test_product_promo_cleared_and_notified_on_read(self):
+        product = self._expired_product()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        product.refresh_from_db()
+        self.assertIsNone(product.multibuy_option)
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+        self.assertIsNone(product.promotion_starts_at)
+        self.assertIsNone(product.promotion_ends_at)
+
+        [notification] = Notification.objects.all()
+        self.assertEqual(
+            notification.message, 'La promoción del producto "Expired Product" ha finalizado.',
+        )
+        self.assertEqual(notification.link, f'/product/edit/{product.id}?section=destacar')
+        self.assertIn(self.user, notification.recipients.all())
+
+    def test_product_name_truncated_at_20_chars_in_notification(self):
+        product = self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        notification = Notification.objects.get()
+        self.assertEqual(
+            notification.message,
+            'La promoción del producto "A Very Long Product ..." ha finalizado.',
+        )
+
+    def test_category_promo_cleared_and_notified_on_read(self):
+        category = self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/product-categories/')
+
+        category.refresh_from_db()
+        self.assertIsNone(category.multibuy_option)
+        self.assertEqual(category.discount_percentage, Decimal('0'))
+        self.assertIsNone(category.promotion_starts_at)
+        self.assertIsNone(category.promotion_ends_at)
+
+        [notification] = Notification.objects.all()
+        self.assertEqual(
+            notification.message, 'La promoción de la categoría "Expired Category" ha finalizado.',
+        )
+        self.assertEqual(notification.link, '')
+        self.assertIn(self.user, notification.recipients.all())
+
+    def test_category_read_via_with_products_also_clears(self):
+        category = self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/product-categories/with_products/')
+
+        category.refresh_from_db()
+        self.assertIsNone(category.promotion_ends_at)
+        self.assertEqual(Notification.objects.count(), 1)
+
+    def test_idempotent_across_repeated_reads(self):
+        self._expired_product()
+        self._expired_category()
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+        client.get('/api/v1/products/product-categories/')
+        client.get('/api/v1/products/products/')
+        client.get('/api/v1/products/product-categories/')
+
+        self.assertEqual(Notification.objects.count(), 2)
+
+    def test_reconfigured_promotion_that_expires_again_notifies_independently(self):
+        product = self._expired_product()
+        client = self.auth_client(self.user)
+        client.get('/api/v1/products/products/')
+        self.assertEqual(Notification.objects.count(), 1)
+
+        now = timezone.now()
+        product.discount_percentage = Decimal('20.00')
+        product.promotion_starts_at = now - timedelta(days=2)
+        product.promotion_ends_at = now - timedelta(days=1)
+        product.save()
+
+        client.get('/api/v1/products/products/')
+
+        self.assertEqual(Notification.objects.count(), 2)
+        product.refresh_from_db()
+        self.assertIsNone(product.promotion_ends_at)
+
+    def test_tenancy_only_affects_the_requesting_business(self):
+        other_user, other_profile = self.make_user('other_expiry_user', 'other_expiry@test.com')
+        mine = self._expired_product(name='Mine')
+        now = timezone.now()
+        theirs = Product.objects.create(
+            name='Theirs', description='Desc', price=Decimal('10.00'),
+            business=other_profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+
+        client = self.auth_client(self.user)
+        client.get('/api/v1/products/products/')
+
+        mine.refresh_from_db()
+        theirs.refresh_from_db()
+        self.assertIsNone(mine.promotion_ends_at)
+        self.assertIsNotNone(theirs.promotion_ends_at)
+        self.assertEqual(Notification.objects.filter(recipients=other_user).count(), 0)
+
+    def test_future_end_date_untouched(self):
+        now = timezone.now()
+        product = Product.objects.create(
+            name='Future Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+            discount_percentage=Decimal('30.00'),
+            promotion_ends_at=now + timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        product.refresh_from_db()
+        self.assertEqual(product.discount_percentage, Decimal('30.00'))
+        self.assertIsNotNone(product.promotion_ends_at)
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_no_promo_configured_untouched(self):
+        product = Product.objects.create(
+            name='Plain Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile,
+        )
+        client = self.auth_client(self.user)
+
+        client.get('/api/v1/products/products/')
+
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_repeated_service_calls_only_notify_once_per_object(self):
+        """Two back-to-back calls to the service entry point (as would happen
+        from overlapping requests) must only notify once per object — the
+        second call's candidate query no longer matches the already-cleared row."""
+        self._expired_product()
+        now = timezone.now()
+
+        handle_expired_promotions_for_business(self.profile, now=now)
+        handle_expired_promotions_for_business(self.profile, now=now)
+
+        self.assertEqual(Notification.objects.count(), 1)
