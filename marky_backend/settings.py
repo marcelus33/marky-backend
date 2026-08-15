@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'users',
     'business',
     'products',
+    'notifications',
 ]
 
 MIDDLEWARE = [
@@ -291,6 +292,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Business', 'description': 'All API endpoints related to business.'},
         {'name': 'Cities', 'description': 'All API endpoints related to cities & countries.'},
         {'name': 'Products', 'description': 'All API endpoints related to products.'},
+        {'name': 'Notifications', 'description': 'All API endpoints related to notifications.'},
         # Add more tags as needed
     ],
 }
