@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
+from .promotions import INACTIVE
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product
 from .serializers import (
@@ -152,6 +153,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
                     'discount_percentage': 0,
                     'promotion_starts_at': None,
                     'promotion_ends_at': None,
+                    'promotion_status': INACTIVE,
                     'products': uncategorized_products_serializer.data
                 }
                 serialized_data.append(no_category_data)
@@ -177,6 +179,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
                 'discount_percentage': 0,
                 'promotion_starts_at': None,
                 'promotion_ends_at': None,
+                'promotion_status': INACTIVE,
                 'products': uncategorized_products_serializer.data
             }
             serialized_data.append(no_category_data)

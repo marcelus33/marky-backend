@@ -1,10 +1,14 @@
 from rest_framework import serializers
 from django.db import transaction, IntegrityError
-from django.utils import timezone
 from decimal import Decimal
 
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
 from .validators import validate_media_extension, validate_media_size
+from .promotions import (
+    resolve_effective_promotion,
+    compute_promotion_status,
+    ACTIVE as PROMOTION_ACTIVE,
+)
 
 # Currencies conventionally quoted without cents (mirrors ISO 4217 zero-decimal
 # currencies relevant to Marky's markets, e.g. Guaraní Paraguayo).
@@ -71,34 +75,19 @@ class ProductPriceMixin:
     def _format_currency_amount(self, amount, code):
         return format_currency_amount(amount, code)
 
-    def _is_date_range_active(self, start, end):
-        """Return True if the date range is considered active for now.
-
-        Business rule: only check the date range if both start and end are set. If either
-        is missing, the date restriction is ignored (treated as active).
-        """
-        if not start or not end:
-            return True
-        now = timezone.now()
-        return start <= now <= end
-
     def _get_effective_discount_percentage(self, obj):
         """Return the effective Decimal discount percentage for a product,
         preferring category discount when active, else product discount.
-        Returns Decimal('0') when no active discount exists.
+        Returns Decimal('0') when there is no currently-active discount, or
+        when `obj` doesn't carry promo fields at all (e.g. ProductVariant/ProductAddon).
         """
-        cat = getattr(obj, 'category', None)
-        # Prefer category value when present and active
-        if cat and getattr(cat, 'discount_percentage', None) is not None and cat.discount_percentage > 0:
-            if self._is_date_range_active(cat.promotion_starts_at, cat.promotion_ends_at):
-                return cat.discount_percentage
+        if not hasattr(obj, 'discount_percentage'):
+            return Decimal('0')
 
-        # Fallback to product discount
-        if getattr(obj, 'discount_percentage', None) is not None and obj.discount_percentage > 0:
-            if self._is_date_range_active(obj.promotion_starts_at, obj.promotion_ends_at):
-                return obj.discount_percentage
-
-        return Decimal('0')
+        bundle = resolve_effective_promotion(obj)
+        if bundle['status'] != PROMOTION_ACTIVE:
+            return Decimal('0')
+        return bundle['discount_percentage'] or Decimal('0')
 
     def _get_discounted_amounts(self, obj):
         """Return (discounted_primary, discounted_secondary, primary_currency, secondary_currency).
@@ -242,12 +231,20 @@ class ProductCategoryLiteSerializer(serializers.ModelSerializer):
 
 
 class ProductCategoryBasicSerializer(serializers.ModelSerializer):
+    promotion_status = serializers.SerializerMethodField()
+
     class Meta:
         model = ProductCategory
         fields = [
             'id', 'name', 'icon', 'multibuy_option', 'discount_percentage',
-            'promotion_starts_at', 'promotion_ends_at', 'is_available'
+            'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'is_available'
         ]
+
+    def get_promotion_status(self, obj):
+        return compute_promotion_status(
+            obj.multibuy_option, obj.discount_percentage,
+            obj.promotion_starts_at, obj.promotion_ends_at,
+        )
 
 
 class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
@@ -264,14 +261,21 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
     category_discount_percentage = serializers.DecimalField(source='category.discount_percentage', max_digits=5, decimal_places=2, read_only=True)
     category_promotion_starts_at = serializers.DateTimeField(source='category.promotion_starts_at', read_only=True, allow_null=True)
     category_promotion_ends_at = serializers.DateTimeField(source='category.promotion_ends_at', read_only=True, allow_null=True)
+    # Status of the PRODUCT'S OWN promo config (not category-inherited): this
+    # is the edit form for this product's row, so "Esta promoción ya
+    # finalizó" must reflect what's actually stored on it, not an inherited
+    # category promo (see category_promotion_status for that).
+    promotion_status = serializers.SerializerMethodField()
+    category_promotion_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             'id', 'name', 'description', 'price', 'category', 'is_active',
             'category_multibuy_option', 'category_discount_percentage', 'category_promotion_starts_at', 'category_promotion_ends_at',
+            'category_promotion_status',
             'stopper', 'multibuy_option', 'discount_percentage', 'is_available',
-            'promotion_starts_at', 'promotion_ends_at', 'business',
+            'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'business',
             'variants', 'addons', 'media',
             # Human-readable prices for the business context
             'primary_price', 'secondary_price',
@@ -279,26 +283,44 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
             'primary_price_with_discount', 'secondary_price_with_discount'
         ]
 
+    def get_promotion_status(self, obj):
+        return compute_promotion_status(
+            obj.multibuy_option, obj.discount_percentage,
+            obj.promotion_starts_at, obj.promotion_ends_at,
+        )
+
+    def get_category_promotion_status(self, obj):
+        category = getattr(obj, 'category', None)
+        if category is None:
+            return None
+        return compute_promotion_status(
+            category.multibuy_option, category.discount_percentage,
+            category.promotion_starts_at, category.promotion_ends_at,
+        )
+
 
 class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     isFavorite = serializers.SerializerMethodField()
     isRecommended = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
-    # Promotion fields: prefer category values when present and active, otherwise fall back to product
+    # Promotion fields: resolved (category-overrides-product, as one atomic
+    # bundle) via resolve_effective_promotion — see _get_promotion_bundle.
     multibuy_option = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
+    promotion_starts_at = serializers.SerializerMethodField()
+    promotion_ends_at = serializers.SerializerMethodField()
+    promotion_status = serializers.SerializerMethodField()
     primary_price = serializers.SerializerMethodField()
     secondary_price = serializers.SerializerMethodField()
     # Human-readable discounted prices (None when there is no active percentage discount)
     primary_price_with_discount = serializers.SerializerMethodField()
     secondary_price_with_discount = serializers.SerializerMethodField()
-    # promotion_starts_at = serializers.SerializerMethodField()
-    # promotion_ends_at = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = ['id', 'name', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
-                  'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at', 'is_available',
+                  'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at',
+                  'promotion_status', 'is_available',
                   'primary_price', 'secondary_price',
                   'primary_price_with_discount', 'secondary_price_with_discount']
 
@@ -334,12 +356,20 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
             return None
         return self._format_currency_amount(secondary_amount, secondary_currency.code)
 
+    def _get_promotion_bundle(self, obj):
+        """Memoized resolve_effective_promotion(obj) per-pk (see _get_amounts)."""
+        cache = self.context.setdefault('_promotion_cache', {})
+        if obj.pk not in cache:
+            cache[obj.pk] = resolve_effective_promotion(obj)
+        return cache[obj.pk]
+
     def _get_discounted_amounts(self, obj):
         primary_amount, secondary_amount, primary_currency, secondary_currency = self._get_amounts(obj)
         if primary_amount is None or primary_currency is None:
             return None, None, None, None
 
-        percent = self._get_effective_discount_percentage(obj)
+        bundle = self._get_promotion_bundle(obj)
+        percent = bundle['discount_percentage'] if bundle['status'] == PROMOTION_ACTIVE else None
         if not percent or percent <= 0:
             return None, None, primary_currency, secondary_currency
 
@@ -379,79 +409,40 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
             return media.file.url
         return None
 
-    def _is_date_range_active(self, start, end):
-        """Return True if the date range is considered active for now.
-
-        Business rule: only check the date range if both start and end are set. If either
-        is missing, the date restriction is ignored (treated as active).
-        """
-        if not start or not end:
-            return True
-        now = timezone.now()
-        return start <= now <= end
-
     def get_multibuy_option(self, obj):
-        # Prefer category value when present and active
-        cat = getattr(obj, 'category', None)
-        if cat and cat.multibuy_option:
-            if self._is_date_range_active(cat.promotion_starts_at, cat.promotion_ends_at):
-                return cat.multibuy_option
-
-        # Fallback to product value when present and active
-        if obj.multibuy_option:
-            if self._is_date_range_active(obj.promotion_starts_at, obj.promotion_ends_at):
-                return obj.multibuy_option
-
-        return None
+        bundle = self._get_promotion_bundle(obj)
+        return bundle['multibuy_option'] if bundle['status'] == PROMOTION_ACTIVE else None
 
     def get_discount_percentage(self, obj):
-        cat = getattr(obj, 'category', None)
-        # Treat a category discount as present if greater than 0
-        if cat and cat.discount_percentage is not None and cat.discount_percentage > 0:
-            if self._is_date_range_active(cat.promotion_starts_at, cat.promotion_ends_at):
-                return cat.discount_percentage
+        bundle = self._get_promotion_bundle(obj)
+        return bundle['discount_percentage'] if bundle['status'] == PROMOTION_ACTIVE else Decimal('0')
 
-        # Fallback to product discount
-        if obj.discount_percentage is not None and obj.discount_percentage > 0:
-            if self._is_date_range_active(obj.promotion_starts_at, obj.promotion_ends_at):
-                return obj.discount_percentage
+    def get_promotion_starts_at(self, obj):
+        return self._get_promotion_bundle(obj)['promotion_starts_at']
 
-        return Decimal('0')
+    def get_promotion_ends_at(self, obj):
+        return self._get_promotion_bundle(obj)['promotion_ends_at']
 
-    # def get_promotion_starts_at(self, obj):
-    #     cat = getattr(obj, 'category', None)
-    #     if cat and (cat.promotion_starts_at or cat.promotion_ends_at):
-    #         if self._is_date_range_active(cat.promotion_starts_at, cat.promotion_ends_at):
-    #             return cat.promotion_starts_at
-    #
-    #     if obj.promotion_starts_at or obj.promotion_ends_at:
-    #         if self._is_date_range_active(obj.promotion_starts_at, obj.promotion_ends_at):
-    #             return obj.promotion_starts_at
-    #
-    #     return None
-    #
-    # def get_promotion_ends_at(self, obj):
-    #     cat = getattr(obj, 'category', None)
-    #     if cat and (cat.promotion_starts_at or cat.promotion_ends_at):
-    #         if self._is_date_range_active(cat.promotion_starts_at, cat.promotion_ends_at):
-    #             return cat.promotion_ends_at
-    #
-    #     if obj.promotion_starts_at or obj.promotion_ends_at:
-    #         if self._is_date_range_active(obj.promotion_starts_at, obj.promotion_ends_at):
-    #             return obj.promotion_ends_at
-    #
-    #     return None
+    def get_promotion_status(self, obj):
+        return self._get_promotion_bundle(obj)['status']
 
 
 class ProductCategoryWithProductsSerializer(serializers.ModelSerializer):
     products = ProductLiteSerializer(many=True, read_only=True)
+    promotion_status = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductCategory
         fields = [
             'id', 'name', 'icon', 'multibuy_option', 'discount_percentage',
-            'promotion_starts_at', 'promotion_ends_at', 'is_available', 'products'
+            'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'is_available', 'products'
         ]
+
+    def get_promotion_status(self, obj):
+        return compute_promotion_status(
+            obj.multibuy_option, obj.discount_percentage,
+            obj.promotion_starts_at, obj.promotion_ends_at,
+        )
 
 
 class PromotionSerializer(serializers.ModelSerializer):
@@ -473,9 +464,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
     variants = ProductVariantInputSerializer(many=True, required=False)
     addons = ProductAddonInputSerializer(many=True, required=False)
     media = ProductMediaInputSerializer(many=True, required=False)
-    is_promotion_active = serializers.BooleanField(write_only=True, required=False)
-    promotion_option = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
-    countdown_active = serializers.BooleanField(write_only=True, required=False)
     description = serializers.CharField(max_length=300)
     category = serializers.PrimaryKeyRelatedField(
         queryset=ProductCategory.objects.none(), required=False, allow_null=True
@@ -488,7 +476,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'stopper', 'multibuy_option', 'discount_percentage',
             'promotion_starts_at', 'promotion_ends_at',
             'variants', 'addons', 'media', 'is_available',
-            'is_promotion_active', 'promotion_option', 'countdown_active'
         ]
 
     def __init__(self, *args, **kwargs):
@@ -499,27 +486,24 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 business=request.user.business_profile
             )
 
+    # Fields the caller never sent are left untouched by DRF's own partial
+    # (PATCH) handling for free — that's what stops an unrelated-field save
+    # from wiping promo config. What DRF does NOT handle for free is a
+    # caller that explicitly wants to CLEAR a field: multipart/form-data (and
+    # drf_nested_forms' own dict-swap for nested bracketed keys, see
+    # promotions.py) means '' arrives as a literal string rather than being
+    # converted to None the way a real JSON `null` would be. Normalize that
+    # deterministically here rather than relying on DRF's HTML-form
+    # empty-string convention, which only fires for genuine QueryDicts.
+    _CLEARABLE_PROMOTION_FIELDS = ('multibuy_option', 'promotion_starts_at', 'promotion_ends_at')
+
     def to_internal_value(self, data):
-        if 'is_promotion_active' in data:
-            is_promotion_active = data.get('is_promotion_active')
-            promotion_option = data.get('promotion_option')
-            countdown_active = data.get('countdown_active')
-
-            if not is_promotion_active:
-                data['multibuy_option'] = None
-                data['discount_percentage'] = 0
-                data['promotion_starts_at'] = None
-                data['promotion_ends_at'] = None
-            else:
-                if promotion_option == 'descuento':
-                    data['multibuy_option'] = None
-                elif promotion_option == 'oferta':
-                    data['discount_percentage'] = 0
-                
-                if not countdown_active:
-                    data['promotion_starts_at'] = None
-                    data['promotion_ends_at'] = None
-
+        data = data.copy()
+        for field in self._CLEARABLE_PROMOTION_FIELDS:
+            if field in data:
+                raw = data.get(field)
+                if isinstance(raw, str) and raw.strip().lower() in ('', 'null', 'none'):
+                    data[field] = None
         return super().to_internal_value(data)
 
     STOPPER_CONFLICT_LABELS = {
@@ -568,6 +552,18 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 'error': self.STOPPER_CONFLICT_MESSAGES[stopper]
             })
 
+        # Resolve against self.instance so a partial update that only sends
+        # one of the two dates is still checked against the other's stored
+        # value. Deliberately no "end must be in the future" rule — an
+        # already-expired promotion must survive an unrelated-field save
+        # (see products/promotions.py), so past end dates are valid.
+        starts_at = attrs.get('promotion_starts_at', getattr(self.instance, 'promotion_starts_at', None))
+        ends_at = attrs.get('promotion_ends_at', getattr(self.instance, 'promotion_ends_at', None))
+        if starts_at and ends_at and starts_at >= ends_at:
+            raise serializers.ValidationError({
+                'promotion_ends_at': 'La fecha de fin debe ser posterior a la fecha de inicio.'
+            })
+
         # media is the full desired gallery state (existing items kept/updated,
         # new items, and items flagged `_delete`); when omitted entirely
         # (e.g. a PATCH that doesn't touch the gallery) there's nothing to
@@ -599,9 +595,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         variants_data = validated_data.pop('variants', [])
         addons_data = validated_data.pop('addons', [])
         media_data = validated_data.pop('media', [])
-        validated_data.pop('is_promotion_active', None)
-        validated_data.pop('promotion_option', None)
-        validated_data.pop('countdown_active', None)
 
         try:
             # Nested atomic = savepoint: on IntegrityError, only this insert
@@ -641,9 +634,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         variants_data = validated_data.pop('variants', [])
         addons_data = validated_data.pop('addons', [])
         media_data = validated_data.pop('media', [])
-        validated_data.pop('is_promotion_active', None)
-        validated_data.pop('promotion_option', None)
-        validated_data.pop('countdown_active', None)
 
         try:
             with transaction.atomic():
