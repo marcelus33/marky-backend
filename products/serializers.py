@@ -223,6 +223,25 @@ class ProductVariantInputSerializer(serializers.ModelSerializer):
         model = ProductVariant
         fields = ['id', 'name', 'price', 'description', 'image', '_delete']
 
+    def validate(self, attrs):
+        # A new variant (no `id`) must always carry an image. An existing
+        # variant being updated doesn't have to resend it — the frontend
+        # omits `image` from the payload when it's unchanged (already an
+        # uploaded file on disk), and legacy variants saved before this rule
+        # existed shouldn't be invalidated by an unrelated-field edit.
+        #
+        # No `_delete` exemption here: an id-less item is always a *create*
+        # regardless of `_delete` (see ProductInputSerializer.create()/
+        # process_related(), which only honor `_delete` for items that
+        # already have an `id`) — so exempting `_delete` would let a payload
+        # like `{"_delete": true}` with no id/image sail through validation
+        # and still get created as an image-less variant.
+        if not attrs.get('id') and not attrs.get('image'):
+            raise serializers.ValidationError({
+                'image': 'La imagen es requerida para cada presentación.'
+            })
+        return attrs
+
 
 class ProductCategoryLiteSerializer(serializers.ModelSerializer):
     class Meta:
@@ -450,6 +469,27 @@ class PromotionSerializer(serializers.ModelSerializer):
         model = ProductCategory
         fields = ['multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at']
 
+    def validate(self, attrs):
+        # Same rule as ProductInputSerializer: a promotion window with no
+        # discount/multibuy type configured is a no-op, so reject it when
+        # this request is the one setting the dates.
+        promo_fields_touched = any(
+            field in attrs
+            for field in ('multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at')
+        )
+        if promo_fields_touched:
+            multibuy_option = attrs.get('multibuy_option', getattr(self.instance, 'multibuy_option', None))
+            discount_percentage = attrs.get('discount_percentage', getattr(self.instance, 'discount_percentage', None))
+            starts_at = attrs.get('promotion_starts_at', getattr(self.instance, 'promotion_starts_at', None))
+            ends_at = attrs.get('promotion_ends_at', getattr(self.instance, 'promotion_ends_at', None))
+            has_type = bool(multibuy_option) or (discount_percentage is not None and discount_percentage > 0)
+            has_dates = bool(starts_at) or bool(ends_at)
+            if has_dates and not has_type:
+                raise serializers.ValidationError({
+                    'discount_percentage': 'Debes seleccionar Descuento u Oferta para activar la promoción.'
+                })
+        return attrs
+
 
 class ProductCategoryOrderSerializer(serializers.Serializer):
     id = serializers.IntegerField()
@@ -563,6 +603,26 @@ class ProductInputSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'promotion_ends_at': 'La fecha de fin debe ser posterior a la fecha de inicio.'
             })
+
+        # A promotion window (dates) with no actual discount/multibuy type is
+        # a no-op that misleads the merchant into thinking a promo is live.
+        # Only checked when this request actually touches a promo field —
+        # an unrelated-field save (e.g. price) must still be able to go
+        # through untouched even for a legacy product saved before this rule
+        # existed.
+        promo_fields_touched = any(
+            field in attrs
+            for field in ('multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at')
+        )
+        if promo_fields_touched:
+            multibuy_option = attrs.get('multibuy_option', getattr(self.instance, 'multibuy_option', None))
+            discount_percentage = attrs.get('discount_percentage', getattr(self.instance, 'discount_percentage', None))
+            has_type = bool(multibuy_option) or (discount_percentage is not None and discount_percentage > 0)
+            has_dates = bool(starts_at) or bool(ends_at)
+            if has_dates and not has_type:
+                raise serializers.ValidationError({
+                    'discount_percentage': 'Debes seleccionar Descuento u Oferta para activar la promoción.'
+                })
 
         # media is the full desired gallery state (existing items kept/updated,
         # new items, and items flagged `_delete`); when omitted entirely

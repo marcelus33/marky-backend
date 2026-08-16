@@ -688,6 +688,108 @@ class TestProductMediaUploadAPI(MarkyAPITestCase):
         self.assertEqual(response.status_code, 201)
 
 
+def _make_test_image(name='variant.png'):
+    """Minimal real PNG bytes — ProductVariant.image is a Pillow-backed
+    ImageField, unlike ProductMedia.file, so a valid image is required."""
+    import io
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new('RGB', (1, 1), color='red').save(buffer, format='PNG')
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type='image/png')
+
+
+class TestProductVariantImageRequired(MarkyAPITestCase):
+    """Ticket 5: every product variant must have an image."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('variant_tenant', 'variant_tenant@test.com')
+
+    def _create_payload(self, **variant_overrides):
+        payload = {
+            'name': 'Product With Variants', 'description': 'Desc', 'price': '10.00',
+            'variants[0][name]': 'Chico', 'variants[0][price]': '5.00',
+        }
+        for key, value in variant_overrides.items():
+            payload[f'variants[0][{key}]'] = value
+        return payload
+
+    def test_new_variant_without_image_rejected_by_api(self):
+        client = self.auth_client(self.user)
+        response = client.post(
+            '/api/v1/products/products/', self._create_payload(), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Variants').exists())
+
+    def test_new_variant_with_image_accepted_by_api(self):
+        client = self.auth_client(self.user)
+        response = client.post(
+            '/api/v1/products/products/',
+            self._create_payload(image=_make_test_image()),
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
+        product = Product.objects.get(name='Product With Variants')
+        self.assertEqual(product.variants.count(), 1)
+        self.assertTrue(product.variants.first().image)
+
+    def test_existing_variant_update_without_resending_image_is_not_invalidated(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        variant = ProductVariant.objects.create(
+            product=product, name='Chico', price=Decimal('5.00'), image=_make_test_image(),
+        )
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'variants[0][id]': str(variant.id), 'variants[0][name]': 'Chico actualizado'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        variant.refresh_from_db()
+        self.assertEqual(variant.name, 'Chico actualizado')
+        self.assertTrue(variant.image)
+
+    def test_legacy_variant_without_image_not_invalidated_by_unrelated_update(self):
+        # Grandfathered row: created directly (bypassing the API) before this
+        # rule existed, so it has no image on disk.
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Legacy Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        variant = ProductVariant.objects.create(product=product, name='Chico', price=Decimal('5.00'))
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'variants[0][id]': str(variant.id), 'variants[0][price]': '6.00'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        variant.refresh_from_db()
+        self.assertEqual(variant.price, Decimal('6.00'))
+
+    def test_delete_flag_on_id_less_variant_does_not_bypass_image_requirement(self):
+        # `_delete` only has meaning for an *existing* variant (one with an
+        # `id`) — process_related() ignores it entirely for id-less items and
+        # always creates them. A payload that sets `_delete` without an `id`
+        # must still be rejected for missing an image, not waved through.
+        client = self.auth_client(self.user)
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                **self._create_payload(),
+                'variants[0][_delete]': 'true',
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Product With Variants').exists())
+
+
 class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):
     """update()'s IntegrityError backstop (previously missing entirely — only
     create() had one) and the disambiguation that keeps an unrelated
@@ -1062,6 +1164,120 @@ class TestProductInputSerializerPromotion(MarkyAPITestCase):
         self.assertEqual(product.discount_percentage, Decimal('0'))
         self.assertIsNone(product.promotion_starts_at)
         self.assertIsNone(product.promotion_ends_at)
+
+    def test_dates_without_discount_or_multibuy_rejected_on_create(self):
+        client = self.auth_client(self.user)
+        now = timezone.now()
+
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'Countdown Only', 'description': 'Desc', 'price': '10.00',
+                'promotion_starts_at': now.isoformat(),
+                'promotion_ends_at': (now + timedelta(days=1)).isoformat(),
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('discount_percentage', response.data)
+        self.assertFalse(Product.objects.filter(name='Countdown Only').exists())
+
+    def test_dates_with_discount_accepted_on_create(self):
+        client = self.auth_client(self.user)
+        now = timezone.now()
+
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'Countdown With Discount', 'description': 'Desc', 'price': '10.00',
+                'discount_percentage': '15.00',
+                'promotion_starts_at': now.isoformat(),
+                'promotion_ends_at': (now + timedelta(days=1)).isoformat(),
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_non_numeric_discount_rejected(self):
+        client = self.auth_client(self.user)
+
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'Bad Discount', 'description': 'Desc', 'price': '10.00',
+                'discount_percentage': 'abc',
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('discount_percentage', response.data)
+
+    def test_legacy_countdown_only_product_survives_unrelated_field_update(self):
+        # Grandfathered row saved before this rule existed: dates set, no
+        # discount/multibuy. An unrelated-field save must not be blocked by
+        # a rule this row predates.
+        now = timezone.now()
+        product = self._create_promo_product(
+            discount_percentage=Decimal('0'),
+            promotion_starts_at=now - timedelta(hours=1),
+            promotion_ends_at=now + timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/', {'price': '30.00'}, format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.price, Decimal('30.00'))
+
+
+class TestProductCategoryPromotionValidation(MarkyAPITestCase):
+    """Backend backstop for Ticket 3: a promotion window with no discount/
+    multibuy type is a no-op and must be rejected, mirroring the product-side
+    rule in TestProductInputSerializerPromotion."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('promo_cat_user', 'promo_cat@test.com')
+        cls.category = ProductCategory.objects.create(business=cls.profile, name='Cat', icon='icon')
+
+    def test_dates_without_type_rejected(self):
+        client = self.auth_client(self.user)
+        now = timezone.now()
+
+        response = client.post(
+            f'/api/v1/products/product-categories/{self.category.id}/add_promotion/',
+            {
+                'promotion_starts_at': now.isoformat(),
+                'promotion_ends_at': (now + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('discount_percentage', response.data)
+
+    def test_dates_with_multibuy_accepted(self):
+        client = self.auth_client(self.user)
+        now = timezone.now()
+
+        response = client.post(
+            f'/api/v1/products/product-categories/{self.category.id}/add_promotion/',
+            {
+                'multibuy_option': '2x1',
+                'promotion_starts_at': now.isoformat(),
+                'promotion_ends_at': (now + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
 
 
 class TestPromotionStatusInResponses(MarkyAPITestCase):
