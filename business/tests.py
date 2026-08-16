@@ -1,7 +1,7 @@
 from django.test import TestCase
 from utils.tests_base import MarkyAPITestCase
 from business.management.commands.seed import Command
-from business.models import Currency
+from business.models import Currency, BusinessProfile
 
 
 class TestBusinessProfileTenancy(MarkyAPITestCase):
@@ -34,6 +34,55 @@ class TestBusinessProfileTenancy(MarkyAPITestCase):
         )
         client = self.auth_client(superuser)
         response = client.get(f'/api/v1/business/business_profile/{self.profile_a.id}/')
+        self.assertEqual(response.status_code, 200)
+
+
+class TestBusinessProfileCreateExchangeDirection(MarkyAPITestCase):
+    """Regression test: BusinessProfileWriteSerializer must not silently
+    default is_primary_to_secondary to True on creation."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, _ = cls.make_user('biz_new', 'biz_new@test.com', with_profile=False)
+
+    def test_create_without_is_primary_to_secondary_is_rejected(self):
+        client = self.auth_client(self.user)
+        response = client.post('/api/v1/business/business_profile/', {
+            'business_id': 'biz-new',
+            'primary_currency': self.primary_currency.id,
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('is_primary_to_secondary', response.data)
+
+    def test_create_persists_explicit_direction_false(self):
+        client = self.auth_client(self.user)
+        response = client.post('/api/v1/business/business_profile/', {
+            'business_id': 'biz-new',
+            'primary_currency': self.primary_currency.id,
+            'secondary_currency': self.secondary_currency.id,
+            'exchange_rate': '6000',
+            'is_primary_to_secondary': False,
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        profile = BusinessProfile.objects.get(business_id='biz-new')
+        self.assertFalse(profile.is_primary_to_secondary)
+
+    def test_partial_update_without_is_primary_to_secondary_still_works(self):
+        client = self.auth_client(self.user)
+        create_response = client.post('/api/v1/business/business_profile/', {
+            'business_id': 'biz-new',
+            'primary_currency': self.primary_currency.id,
+            'is_primary_to_secondary': True,
+        }, format='json')
+        self.assertEqual(create_response.status_code, 201)
+        profile_id = BusinessProfile.objects.get(business_id='biz-new').id
+
+        response = client.patch(
+            f'/api/v1/business/business_profile/{profile_id}/',
+            {'business_id': 'biz-new-renamed'},
+            format='json',
+        )
         self.assertEqual(response.status_code, 200)
 
 

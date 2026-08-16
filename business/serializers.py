@@ -13,6 +13,7 @@ class BusinessProfileWriteSerializer(serializers.ModelSerializer):
     city = serializers.PrimaryKeyRelatedField(queryset=City.objects.all(), required=False)
     primary_currency = serializers.PrimaryKeyRelatedField(queryset=Currency.objects.all())
     secondary_currency = serializers.PrimaryKeyRelatedField(queryset=Currency.objects.all(), required=False)
+    is_primary_to_secondary = serializers.BooleanField(required=True)
 
     class Meta:
         model = BusinessProfile
