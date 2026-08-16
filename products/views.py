@@ -136,15 +136,21 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
         else:
             products_count = filtered_qs.aggregate(total_products=models.Count('products'))['total_products']
 
+        # Products without a category aren't included in filtered_qs (there's no
+        # ProductCategory row for them), so products_count must account for them
+        # separately or a business whose only products are uncategorized would be
+        # reported as having zero products.
+        products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
+        if has_promotion:
+            products_without_category = products_without_category.filter(product_has_active_promotion_q())
+        products_count += products_without_category.count()
+
         page = self.paginate_queryset(filtered_qs)
         if page is not None:
             serializer = self.get_serializer(page, many=True, context={'request': request})
             serialized_data = serializer.data
 
             # Now, handle products without a category
-            products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
-            if has_promotion:
-                products_without_category = products_without_category.filter(product_has_active_promotion_q())
             if products_without_category.exists():
                 uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
                 no_category_data = {
@@ -168,9 +174,6 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
         serialized_data = serializer.data
 
         # Also handle for non-paginated response
-        products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
-        if has_promotion:
-            products_without_category = products_without_category.filter(product_has_active_promotion_q())
         if products_without_category.exists():
             uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
             no_category_data = {

@@ -313,6 +313,49 @@ class TestWithProductsPromotionFilter(MarkyAPITestCase):
         )
 
 
+class TestWithProductsUncategorizedCount(MarkyAPITestCase):
+    """products_count must include products with no category (the synthetic
+    'Sin categoría' bucket), not just products belonging to a real
+    ProductCategory row."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('uncategorized_user', 'uncategorized@test.com')
+
+    def test_products_count_when_only_uncategorized_products_exist(self):
+        # A business whose only product has no category at all (e.g. the very
+        # first product ever added, before any category exists).
+        Product.objects.create(
+            name='Uncategorized', description='Desc', price=Decimal('4.00'),
+            business=self.profile,
+        )
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['products_count'], 1)
+        results = {cat['name']: cat for cat in response.data['results']}
+        self.assertIn('Sin categoría', results)
+
+    def test_products_count_includes_both_categorized_and_uncategorized(self):
+        category = ProductCategory.objects.create(
+            business=self.profile, name='Postres', icon='icon',
+        )
+        Product.objects.create(
+            name='Categorized', description='Desc', price=Decimal('3.00'),
+            business=self.profile, category=category,
+        )
+        Product.objects.create(
+            name='Uncategorized', description='Desc', price=Decimal('4.00'),
+            business=self.profile,
+        )
+        client = self.auth_client(self.user)
+        response = client.get('/api/v1/products/product-categories/with_products/')
+
+        self.assertEqual(response.data['products_count'], 2)
+
+
 class TestProductTenancy(MarkyAPITestCase):
 
     @classmethod
