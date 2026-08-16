@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from rest_framework import serializers
 from django.db import transaction, IntegrityError
 from decimal import Decimal
@@ -187,6 +189,27 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
 
 
+class DeletableNestedItemMixin:
+    """Lets a nested child row be sent as a bare tombstone: {id, _delete: true}.
+
+    Removing a variant/addon only needs its id, but the wrapped ModelSerializer
+    otherwise requires `name`/`price` (they're non-blank on the model), which
+    would reject a client that (reasonably) omits fields it isn't changing.
+    Mirrors the string coercion ProductMediaInputSerializer.to_internal_value
+    already does for `_delete`, since multipart delivers it as "true"/"1".
+    """
+
+    def to_internal_value(self, data):
+        if isinstance(data, Mapping):
+            flag = data.get('_delete')
+            if isinstance(flag, str):
+                flag = flag.strip().lower() in ('true', '1')
+            item_id = data.get('id')
+            if flag and item_id not in (None, ''):
+                return {'id': int(item_id), '_delete': True}
+        return super().to_internal_value(data)
+
+
 class ProductAddonSerializer(ProductPriceMixin, serializers.ModelSerializer):
     primary_price = serializers.SerializerMethodField()
     secondary_price = serializers.SerializerMethodField()
@@ -196,7 +219,7 @@ class ProductAddonSerializer(ProductPriceMixin, serializers.ModelSerializer):
         fields = '__all__'
 
 
-class ProductAddonInputSerializer(serializers.ModelSerializer):
+class ProductAddonInputSerializer(DeletableNestedItemMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     _delete = serializers.BooleanField(required=False, default=False)
 
@@ -214,7 +237,7 @@ class ProductVariantSerializer(ProductPriceMixin, serializers.ModelSerializer):
         fields = '__all__'
 
 
-class ProductVariantInputSerializer(serializers.ModelSerializer):
+class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelSerializer):
     image = serializers.ImageField(required=False)
     id = serializers.IntegerField(required=False)
     _delete = serializers.BooleanField(required=False, default=False)
