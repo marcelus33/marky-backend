@@ -833,6 +833,175 @@ class TestProductVariantImageRequired(MarkyAPITestCase):
         self.assertFalse(Product.objects.filter(name='Product With Variants').exists())
 
 
+class TestProductVariantNestedWrite(MarkyAPITestCase):
+    """Regression coverage for the frontend sending a fake client-side id
+    (Date.now()) on new variant rows: process_related() treats any item with
+    an `id` as an update against an existing row, so a fake id made new
+    variants silently vanish instead of being created. Id-less items must
+    always be created with a DB-allocated pk, and deletion must go through
+    the `_delete` tombstone rather than merely disappearing from the array.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('variant_write_tenant', 'variant_write_tenant@test.com')
+
+    def test_id_less_variant_created_with_db_allocated_pk_not_client_value(self):
+        client = self.auth_client(self.user)
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'New Product', 'description': 'Desc', 'price': '10.00',
+                'variants[0][name]': 'Chico', 'variants[0][price]': '5.00',
+                'variants[0][image]': _make_test_image(),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
+        product = Product.objects.get(name='New Product')
+        variant = product.variants.get()
+        self.assertEqual(variant.name, 'Chico')
+
+    def test_id_less_variant_added_on_update_is_created_alongside_existing(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        existing = ProductVariant.objects.create(
+            product=product, name='Chico', price=Decimal('5.00'), image=_make_test_image(),
+        )
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {
+                'variants[0][id]': str(existing.id), 'variants[0][name]': 'Chico',
+                'variants[1][name]': 'Grande', 'variants[1][price]': '8.00',
+                'variants[1][image]': _make_test_image(),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(product.variants.count(), 2)
+        self.assertTrue(product.variants.filter(name='Grande').exists())
+
+    def test_tombstone_deletes_existing_variant_without_resending_image(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        variant = ProductVariant.objects.create(
+            product=product, name='Chico', price=Decimal('5.00'), image=_make_test_image(),
+        )
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'variants[0][id]': str(variant.id), 'variants[0][_delete]': 'true'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(ProductVariant.objects.filter(id=variant.id).exists())
+
+    def test_omitting_variants_entirely_leaves_them_untouched(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        ProductVariant.objects.create(
+            product=product, name='Chico', price=Decimal('5.00'), image=_make_test_image(),
+        )
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'price': '12.00'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(product.variants.count(), 1)
+
+
+class TestProductAddonNestedWrite(MarkyAPITestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('addon_write_tenant', 'addon_write_tenant@test.com')
+
+    def test_id_less_addon_created_on_create(self):
+        client = self.auth_client(self.user)
+        response = client.post(
+            '/api/v1/products/products/',
+            {
+                'name': 'New Product', 'description': 'Desc', 'price': '10.00',
+                'addons[0][name]': 'Queso extra', 'addons[0][price]': '2.00',
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
+        product = Product.objects.get(name='New Product')
+        self.assertEqual(product.addons.count(), 1)
+        self.assertEqual(product.addons.get().name, 'Queso extra')
+
+    def test_id_less_addon_added_on_update_is_created_alongside_existing(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        existing = ProductAddon.objects.create(product=product, name='Queso extra', price=Decimal('2.00'))
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {
+                'addons[0][id]': str(existing.id), 'addons[0][name]': 'Queso extra',
+                'addons[1][name]': 'Tocino', 'addons[1][price]': '3.00',
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(product.addons.count(), 2)
+        self.assertTrue(product.addons.filter(name='Tocino').exists())
+
+    def test_tombstone_deletes_existing_addon_without_resending_name_or_price(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        addon = ProductAddon.objects.create(product=product, name='Queso extra', price=Decimal('2.00'))
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'addons[0][id]': str(addon.id), 'addons[0][_delete]': 'true'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(ProductAddon.objects.filter(id=addon.id).exists())
+
+    def test_update_existing_addon_name_and_price_in_place(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        addon = ProductAddon.objects.create(product=product, name='Queso extra', price=Decimal('2.00'))
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'addons[0][id]': str(addon.id), 'addons[0][name]': 'Queso premium', 'addons[0][price]': '3.50'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        addon.refresh_from_db()
+        self.assertEqual(addon.name, 'Queso premium')
+        self.assertEqual(addon.price, Decimal('3.50'))
+
+    def test_omitting_addons_entirely_leaves_them_untouched(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        ProductAddon.objects.create(product=product, name='Queso extra', price=Decimal('2.00'))
+        response = client.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'price': '12.00'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(product.addons.count(), 1)
+
+
 class TestProductStopperIntegrityErrorBackstop(MarkyAPITestCase):
     """update()'s IntegrityError backstop (previously missing entirely — only
     create() had one) and the disambiguation that keeps an unrelated
