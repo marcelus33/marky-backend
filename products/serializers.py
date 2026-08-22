@@ -79,7 +79,7 @@ class ProductPriceMixin:
 
     def _get_effective_discount_percentage(self, obj):
         """Return the effective Decimal discount percentage for a product,
-        preferring category discount when active, else product discount.
+        preferring the product's own discount when active, else the category's.
         Returns Decimal('0') when there is no currently-active discount, or
         when `obj` doesn't carry promo fields at all (e.g. ProductVariant/ProductAddon).
         """
@@ -345,7 +345,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     isFavorite = serializers.SerializerMethodField()
     isRecommended = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
-    # Promotion fields: resolved (category-overrides-product, as one atomic
+    # Promotion fields: resolved (product-overrides-category, as one atomic
     # bundle) via resolve_effective_promotion — see _get_promotion_bundle.
     multibuy_option = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
