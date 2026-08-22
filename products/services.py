@@ -67,5 +67,5 @@ def handle_expired_promotions_for_business(business, now=None):
             users=recipients,
             title='Promoción finalizada',
             message=f'La promoción de la categoría "{_truncate_name(category.name)}" ha finalizado.',
-            link='',
+            link=f'/home?promoCategory={category.id}',
         )

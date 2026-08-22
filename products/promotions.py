@@ -49,13 +49,34 @@ def compute_promotion_status(multibuy_option, discount_percentage, starts_at, en
 
 def resolve_effective_promotion(product, now=None):
     """Return the promo bundle that should be shown for a Product, honoring
-    category-overrides-product inheritance as one atomic unit.
+    product-overrides-category inheritance as one atomic unit.
 
-    Returns a dict with 'source' ('category' | 'product'), 'status', and the
+    Returns a dict with 'source' ('product' | 'category'), 'status', and the
     4 promo fields all drawn from the same source — never a category
     discount paired with the product's own dates or vice versa.
+
+    Priority (highest first):
+      1. The product's own promotion, if its status is 'active' or 'scheduled'.
+      2. Otherwise, the category's promotion, if its status is 'active' or 'scheduled'.
+      3. Otherwise, the product's own bundle regardless of status ('expired' or
+         'inactive') — the final fallback so callers always get a
+         product-shaped bundle when nothing is currently show-worthy.
     """
     now = now or timezone.now()
+
+    product_status = compute_promotion_status(
+        product.multibuy_option, product.discount_percentage,
+        product.promotion_starts_at, product.promotion_ends_at, now,
+    )
+    if product_status in (ACTIVE, SCHEDULED):
+        return {
+            'source': 'product',
+            'status': product_status,
+            'multibuy_option': product.multibuy_option,
+            'discount_percentage': product.discount_percentage,
+            'promotion_starts_at': product.promotion_starts_at,
+            'promotion_ends_at': product.promotion_ends_at,
+        }
 
     category = getattr(product, 'category', None)
     if category is not None:
@@ -73,10 +94,6 @@ def resolve_effective_promotion(product, now=None):
                 'promotion_ends_at': category.promotion_ends_at,
             }
 
-    product_status = compute_promotion_status(
-        product.multibuy_option, product.discount_percentage,
-        product.promotion_starts_at, product.promotion_ends_at, now,
-    )
     return {
         'source': 'product',
         'status': product_status,
