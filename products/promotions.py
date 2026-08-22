@@ -56,11 +56,16 @@ def resolve_effective_promotion(product, now=None):
     discount paired with the product's own dates or vice versa.
 
     Priority (highest first):
-      1. The product's own promotion, if its status is 'active' or 'scheduled'.
-      2. Otherwise, the category's promotion, if its status is 'active' or 'scheduled'.
-      3. Otherwise, the product's own bundle regardless of status ('expired' or
-         'inactive') — the final fallback so callers always get a
-         product-shaped bundle when nothing is currently show-worthy.
+      1. The product's own promotion, if it is currently ACTIVE. A merely
+         SCHEDULED product promo does not yet override anything — a live
+         category discount must keep applying until the product's own promo
+         actually starts.
+      2. Otherwise, the category's promotion, if its status is 'active' or
+         'scheduled'.
+      3. Otherwise, the product's own bundle regardless of status
+         ('scheduled', 'expired', or 'inactive') — the final fallback, which is
+         what surfaces a product's own scheduled promo's "starts in X" state
+         when there is no competing category promo.
     """
     now = now or timezone.now()
 
@@ -68,7 +73,7 @@ def resolve_effective_promotion(product, now=None):
         product.multibuy_option, product.discount_percentage,
         product.promotion_starts_at, product.promotion_ends_at, now,
     )
-    if product_status in (ACTIVE, SCHEDULED):
+    if product_status == ACTIVE:
         return {
             'source': 'product',
             'status': product_status,

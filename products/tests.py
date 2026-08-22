@@ -1193,7 +1193,10 @@ class TestResolveEffectivePromotion(SimpleTestCase):
         self.assertEqual(bundle['source'], 'product')
         self.assertEqual(bundle['status'], ACTIVE)
 
-    def test_scheduled_product_still_wins_over_active_category(self):
+    def test_scheduled_product_does_not_block_active_category(self):
+        # A merely SCHEDULED product promo (configured but not started yet)
+        # must not override a currently-live category discount — per PM
+        # decision, the product only overrides once it is actually ACTIVE.
         now = timezone.now()
         category = self._category(
             discount_percentage=Decimal('20.00'),
@@ -1205,8 +1208,42 @@ class TestResolveEffectivePromotion(SimpleTestCase):
 
         bundle = resolve_effective_promotion(product, now=now)
 
+        self.assertEqual(bundle['source'], 'category')
+        self.assertEqual(bundle['status'], ACTIVE)
+        self.assertEqual(bundle['discount_percentage'], Decimal('20.00'))
+        self.assertEqual(bundle['promotion_starts_at'], category.promotion_starts_at)
+        self.assertEqual(bundle['promotion_ends_at'], category.promotion_ends_at)
+
+    def test_scheduled_product_wins_when_no_competing_category_promo(self):
+        # A product's own scheduled promo still surfaces its "starts in X"
+        # state via the final fallback when nothing else competes for it.
+        now = timezone.now()
+        category = self._category()  # nothing configured
+        product = self._product(
+            category=category, discount_percentage=Decimal('5.00'), starts_at=now + timedelta(days=1),
+        )
+
+        bundle = resolve_effective_promotion(product, now=now)
+
         self.assertEqual(bundle['source'], 'product')
         self.assertEqual(bundle['status'], SCHEDULED)
+        self.assertEqual(bundle['discount_percentage'], Decimal('5.00'))
+        self.assertEqual(bundle['promotion_starts_at'], product.promotion_starts_at)
+        self.assertEqual(bundle['promotion_ends_at'], product.promotion_ends_at)
+
+    def test_scheduled_category_promo_inherited_by_plain_product(self):
+        now = timezone.now()
+        category = self._category(
+            discount_percentage=Decimal('15.00'),
+            starts_at=now + timedelta(days=1), ends_at=now + timedelta(days=8),
+        )
+        product = self._product(category=category)  # no promo config of its own
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'category')
+        self.assertEqual(bundle['status'], SCHEDULED)
+        self.assertEqual(bundle['discount_percentage'], Decimal('15.00'))
 
     def test_inactive_category_falls_back_to_product(self):
         # Trivially true under product-first priority too: the product's own
@@ -1235,6 +1272,24 @@ class TestResolveEffectivePromotion(SimpleTestCase):
         self.assertEqual(bundle['source'], 'category')
         self.assertEqual(bundle['status'], ACTIVE)
         self.assertEqual(bundle['discount_percentage'], Decimal('20.00'))
+
+    def test_expired_product_and_no_competing_category_falls_back_to_product_source(self):
+        # Kills the "fallback source flipped to category" mutant: with the
+        # product's own promo EXPIRED and no category promo to compete, the
+        # final fallback must still explicitly report source='product' (not
+        # silently default to 'category').
+        now = timezone.now()
+        category = self._category()  # nothing configured
+        product = self._product(
+            category=category, discount_percentage=Decimal('5.00'),
+            starts_at=now - timedelta(days=10), ends_at=now - timedelta(days=9),
+        )
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['status'], EXPIRED)
+        self.assertEqual(bundle['discount_percentage'], Decimal('5.00'))
 
 
 class TestPromotionStatusFilterConsistency(MarkyAPITestCase):
@@ -1572,8 +1627,11 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
         Product.objects.create(
             name='Inherits Category Promo', description='Desc', price=Decimal('10.00'),
             business=self.profile, category=category,
-            # Product's OWN promo dates are stale/expired — the resolved
-            # dates shown to the card/quick modal must be the category's.
+            # Product's OWN promo dates are already past ends_at — by the time
+            # this resolves, the lazy expiry sweep (triggered by the GET below)
+            # has already cleared them, so the product is plain inactive (not
+            # merely "expired") — the resolved dates shown to the card/quick
+            # modal must be the category's.
             discount_percentage=Decimal('5.00'),
             promotion_starts_at=now - timedelta(days=10),
             promotion_ends_at=now - timedelta(days=9),
@@ -1734,6 +1792,49 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
         [returned_product] = response.data['results'][0]['products']
         self.assertEqual(returned_product['promotion_status'], ACTIVE)
         self.assertEqual(returned_product['discount_percentage'], Decimal('5.00'))
+
+    def test_scheduled_product_promo_and_active_category_agree_between_filter_and_resolver(self):
+        # Regression for a filter/resolver drift: product_has_active_promotion_q()
+        # (products/filters.py) and resolve_effective_promotion() must agree on
+        # the product-SCHEDULED + category-ACTIVE cell. Before the priority fix
+        # (product override requires ACTIVE, not just ACTIVE-or-SCHEDULED), the
+        # resolver reported the product's own (not-yet-started) promo here while
+        # the filter still matched the category's live discount — i.e. the
+        # display showed no discount for a product the filter said was on promo.
+        now = timezone.now()
+        category = ProductCategory.objects.create(
+            business=self.profile, name='Cat Active', icon='icon',
+            discount_percentage=Decimal('40.00'),
+            promotion_starts_at=now - timedelta(hours=1),
+            promotion_ends_at=now + timedelta(hours=1),
+        )
+        Product.objects.create(
+            name='Own Scheduled Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=category,
+            discount_percentage=Decimal('5.00'),
+            promotion_starts_at=now + timedelta(days=1),
+        )
+        client = self.auth_client(self.user)
+
+        # (b) The has_promotion filter (product_has_active_promotion_q, used by
+        # with_products?has_promotion=true) must include this product: its
+        # category has a genuinely active promo even though the product's own
+        # promo hasn't started.
+        response = client.get(
+            '/api/v1/products/product-categories/with_products/',
+            {'ids': str(category.id), 'has_promotion': 'true'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        [returned_category] = response.data['results']
+        [returned_product] = returned_category['products']
+
+        # (a) The resolved display must show the category's ACTIVE discount,
+        # not the product's own not-yet-started one — agreeing with the filter.
+        self.assertEqual(returned_product['promotion_status'], ACTIVE)
+        self.assertEqual(returned_product['discount_percentage'], Decimal('40.00'))
+        self.assertEqual(returned_product['promotion_starts_at'], category.promotion_starts_at)
+        self.assertEqual(returned_product['promotion_ends_at'], category.promotion_ends_at)
 
 
 class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
