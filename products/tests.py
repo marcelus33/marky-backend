@@ -1152,9 +1152,13 @@ class TestResolveEffectivePromotion(SimpleTestCase):
 
     def test_active_product_promo_wins_over_category(self):
         now = timezone.now()
+        # Both windows must independently resolve to ACTIVE — the category
+        # is a genuine, undisqualified active candidate here, not one that's
+        # disqualified by its own expiry (see test_product_wins_regardless_of_category_expiry
+        # for that case).
         category = self._category(
             discount_percentage=Decimal('20.00'),
-            starts_at=now - timedelta(days=10), ends_at=now - timedelta(days=9),
+            starts_at=now - timedelta(hours=2), ends_at=now + timedelta(hours=2),
         )
         product = self._product(
             category=category, discount_percentage=Decimal('5.00'),
@@ -1590,11 +1594,15 @@ class TestPromotionStatusInResponses(MarkyAPITestCase):
 
     def test_product_promo_active_uses_product_dates_not_category_dates(self):
         now = timezone.now()
+        # Category's own window must independently resolve to ACTIVE too — a
+        # genuine, undisqualified active candidate, so this proves the
+        # product wins over an active category rather than merely winning by
+        # the category being disqualified through its own expiry.
         category = ProductCategory.objects.create(
             business=self.profile, name='Cat Promo', icon='icon',
             discount_percentage=Decimal('40.00'),
-            promotion_starts_at=now - timedelta(days=10),
-            promotion_ends_at=now - timedelta(days=9),
+            promotion_starts_at=now - timedelta(hours=2),
+            promotion_ends_at=now + timedelta(hours=2),
         )
         product = Product.objects.create(
             name='Has Own Active Promo', description='Desc', price=Decimal('10.00'),
