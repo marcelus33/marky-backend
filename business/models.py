@@ -92,11 +92,17 @@ class SocialMediaLink(models.Model):
     Social media links for the Business profiles.
     """
     PLATFORM_CHOICES = [
-        ('facebook', 'Facebook'),
         ('instagram', 'Instagram'),
-        ('whatsapp', 'Whatsapp'),
-        ('website', 'Sitio Web'),
+        ('facebook', 'Facebook'),
+        ('tiktok', 'TikTok'),
+        ('whatsapp', 'WhatsApp'),
+        ('link', 'Enlaces'),
     ]
+    # Canales que admiten varios destinos, cada uno con nombre identificador.
+    MULTI_ENTRY_PLATFORMS = {'whatsapp', 'link'}
+    MAX_ENTRIES_PER_PLATFORM = 3
+    MAX_SELECTED_PLATFORMS = 3
+    LABEL_MAX_LENGTH = 22  # coincide con el contador x/22 del diseño
 
     business = models.ForeignKey(
         BusinessProfile,
@@ -107,10 +113,26 @@ class SocialMediaLink(models.Model):
         max_length=20,
         choices=PLATFORM_CHOICES
     )
+    label = models.CharField(max_length=LABEL_MAX_LENGTH, blank=True)
     url = models.CharField(max_length=255,)
+    order = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
-        unique_together = ('business', 'platform')
+        ordering = ['platform', 'order', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['business', 'platform', 'order'],
+                name='uniq_social_link_business_platform_order',
+            ),
+            # Defensa a nivel de DB del tope de 1 entrada para los canales
+            # que no están en MULTI_ENTRY_PLATFORMS, para cualquier código
+            # que cree filas fuera de SocialMediaLinksReplaceSerializer.
+            models.UniqueConstraint(
+                fields=['business', 'platform'],
+                condition=~models.Q(platform__in=('whatsapp', 'link')),
+                name='uniq_social_link_business_platform_single_entry',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.business.business_id} – {self.get_platform_display()}"

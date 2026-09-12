@@ -1,9 +1,13 @@
+import re
+
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
 from .validators import validate_image_size, validate_image_extension
 from cities_light.models import City, Country
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 
 User = get_user_model()
 
@@ -65,65 +69,117 @@ class CountrySerializer(serializers.ModelSerializer):
 
 class SocialMediaLinkSerializer(serializers.ModelSerializer):
     platform_display = serializers.CharField(source='get_platform_display', read_only=True)
-    
+
     class Meta:
         model = SocialMediaLink
-        fields = ['id', 'platform', 'platform_display', 'url']
-        
-    def create(self, validated_data):
-        # Get the business from the context (will be set in the view)
-        business = self.context['business']
-        validated_data['business'] = business
-        return super().create(validated_data)
-        
-    def update(self, instance, validated_data):
-        # Ensure business cannot be changed during update
-        validated_data.pop('business', None)
-        return super().update(instance, validated_data)
+        fields = ['id', 'platform', 'platform_display', 'label', 'url', 'order']
+        read_only_fields = fields
 
 
-class SocialMediaLinkBulkUpdateSerializer(serializers.Serializer):
+class SocialMediaLinkEntrySerializer(serializers.Serializer):
     """
-    Serializer for bulk updating social media links.
-    Accepts platform names as field names with URLs as values.
+    One channel destination in a SocialMediaLinksReplaceSerializer payload.
     """
-    facebook = serializers.URLField(required=False, allow_blank=False, help_text="Facebook page URL")
-    instagram = serializers.URLField(required=False, allow_blank=False, help_text="Instagram profile URL")
-    whatsapp = serializers.CharField(required=False, allow_blank=False, help_text="WhatsApp number or URL")
-    website = serializers.URLField(required=False, allow_blank=False, help_text="Website URL")
-    
-    def validate(self, data):
-        """
-        Validate that at least one platform is provided and all URLs are valid.
-        """
-        if not data:
-            raise serializers.ValidationError("At least one social media platform must be provided.")
-        
-        # Validate WhatsApp format (can be phone number or URL)
-        if 'whatsapp' in data:
-            whatsapp_value = data['whatsapp']
-            # Allow phone numbers or WhatsApp URLs
-            if not (whatsapp_value.startswith('http') or whatsapp_value.replace('+', '').replace(' ', '').isdigit()):
-                raise serializers.ValidationError({
-                    'whatsapp': 'WhatsApp must be a valid phone number or URL.'
-                })
-        
-        return data
+    platform = serializers.ChoiceField(choices=SocialMediaLink.PLATFORM_CHOICES)
+    label = serializers.CharField(
+        max_length=SocialMediaLink.LABEL_MAX_LENGTH, required=False, allow_blank=True
+    )
+    url = serializers.CharField(max_length=255)
+
+    def validate_url(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('El campo no puede estar vacío.')
+        return value
 
 
-class SocialMediaLinkBulkUpdateResponseSerializer(serializers.Serializer):
+class SocialMediaLinksReplaceResponseSerializer(serializers.Serializer):
     """
-    Serializer for the bulk update response.
+    Response envelope for the full-replacement channels endpoint.
     """
     social_links = SocialMediaLinkSerializer(many=True, read_only=True)
-    created = serializers.IntegerField(read_only=True, help_text="Number of links created")
-    updated = serializers.IntegerField(read_only=True, help_text="Number of links updated")
-    removed = serializers.IntegerField(read_only=True, help_text="Number of links removed")
-    removed_platforms = serializers.ListField(
-        child=serializers.CharField(),
-        read_only=True,
-        help_text="List of platforms that were removed"
-    )
+
+
+class SocialMediaLinksReplaceSerializer(serializers.Serializer):
+    """
+    Replaces the full set of a business's social/contact channels in one shot.
+    Validates the whole set together (max channels selected, max entries per
+    channel, required label for multi-entry channels, per-platform URL
+    normalization/validation, no duplicate URLs within a channel).
+    """
+    channels = SocialMediaLinkEntrySerializer(many=True, allow_empty=True)
+
+    def _validate_whatsapp(self, url):
+        digits = re.sub(r'\D', '', url)
+        if len(digits) < 11:
+            raise serializers.ValidationError(
+                'El número de WhatsApp debe incluir el código de país.'
+            )
+        return digits
+
+    def _validate_url(self, url):
+        # instagram/facebook/tiktok/link todos llegan como URL completa (el
+        # frontend antepone el prefijo de cada red antes de enviar).
+        normalized = url if re.match(r'^https?://', url, re.IGNORECASE) else f'https://{url}'
+        validator = URLValidator()
+        try:
+            validator(normalized)
+        except DjangoValidationError:
+            raise serializers.ValidationError('Ingresa una URL válida.')
+        return normalized
+
+    def validate(self, data):
+        channels = data['channels']
+
+        selected_platforms = {entry['platform'] for entry in channels}
+        if len(selected_platforms) > SocialMediaLink.MAX_SELECTED_PLATFORMS:
+            raise serializers.ValidationError(
+                f'Puedes seleccionar hasta {SocialMediaLink.MAX_SELECTED_PLATFORMS} canales.'
+            )
+
+        entries_by_platform: dict = {}
+        for entry in channels:
+            entries_by_platform.setdefault(entry['platform'], []).append(entry)
+
+        normalized_channels = []
+        for platform, entries in entries_by_platform.items():
+            is_multi = platform in SocialMediaLink.MULTI_ENTRY_PLATFORMS
+            max_entries = (
+                SocialMediaLink.MAX_ENTRIES_PER_PLATFORM if is_multi else 1
+            )
+            if len(entries) > max_entries:
+                raise serializers.ValidationError(
+                    f'"{platform}" admite como máximo {max_entries} entrada(s).'
+                )
+
+            seen_urls = set()
+            for entry in entries:
+                label = entry.get('label', '').strip()
+                url = entry['url'].strip()
+
+                if is_multi and not label:
+                    raise serializers.ValidationError(
+                        {'label': f'El nombre es obligatorio para "{platform}".'}
+                    )
+                if not is_multi:
+                    label = ''
+
+                if platform == 'whatsapp':
+                    url = self._validate_whatsapp(url)
+                else:
+                    url = self._validate_url(url)
+
+                if url in seen_urls:
+                    raise serializers.ValidationError(
+                        f'Hay una entrada duplicada en "{platform}".'
+                    )
+                seen_urls.add(url)
+
+                normalized_channels.append(
+                    {'platform': platform, 'label': label, 'url': url}
+                )
+
+        data['channels'] = normalized_channels
+        return data
 
 
 class BranchAttributeSerializer(serializers.ModelSerializer):
