@@ -1,7 +1,7 @@
 from django.test import TestCase
 from utils.tests_base import MarkyAPITestCase
 from business.management.commands.seed import Command
-from business.models import Currency, BusinessProfile
+from business.models import Currency, BusinessProfile, SocialMediaLink
 
 
 class TestBusinessProfileTenancy(MarkyAPITestCase):
@@ -84,6 +84,155 @@ class TestBusinessProfileCreateExchangeDirection(MarkyAPITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 200)
+
+
+class SocialMediaLinksReplaceTests(MarkyAPITestCase):
+    """Coverage for POST /business/social-media-links/bulk-update/, the
+    full-replacement endpoint backing the Canales modal."""
+
+    URL = '/api/v1/business/social-media-links/bulk-update/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('biz_channels', 'biz_channels@test.com')
+
+    def setUp(self):
+        self.client_ = self.auth_client(self.user)
+
+    def test_full_replacement(self):
+        SocialMediaLink.objects.create(
+            business=self.profile, platform='whatsapp', label='Viejo', url='595981111111'
+        )
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'instagram', 'url': 'https://www.instagram.com/dulce_momento'},
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 234 567'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        links = SocialMediaLink.objects.filter(business=self.profile)
+        self.assertEqual(links.count(), 2)
+        self.assertFalse(links.filter(label='Viejo').exists())
+
+    def test_three_whatsapps_ok(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 111 111'},
+                {'platform': 'whatsapp', 'label': 'Atención', 'url': '+595 981 222 222'},
+                {'platform': 'whatsapp', 'label': 'Eventos', 'url': '+595 981 333 333'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            SocialMediaLink.objects.filter(business=self.profile, platform='whatsapp').count(), 3
+        )
+
+    def test_four_whatsapps_rejected(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'A', 'url': '+595 981 111 111'},
+                {'platform': 'whatsapp', 'label': 'B', 'url': '+595 981 222 222'},
+                {'platform': 'whatsapp', 'label': 'C', 'url': '+595 981 333 333'},
+                {'platform': 'whatsapp', 'label': 'D', 'url': '+595 981 444 444'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_instagram_url_must_be_valid(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'instagram', 'url': 'not a url at all'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_label_for_multi_entry_platform_rejected(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'url': '+595 981 111 111'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_more_than_three_platforms_rejected(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'instagram', 'url': 'https://www.instagram.com/a'},
+                {'platform': 'facebook', 'url': 'https://www.facebook.com/a'},
+                {'platform': 'tiktok', 'url': 'https://www.tiktok.com/@a'},
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 111 111'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_link_url_normalized_without_scheme(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'link', 'label': 'Cómo llegar', 'url': 'maps.google.com/xyz'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        link = SocialMediaLink.objects.get(business=self.profile, platform='link')
+        self.assertEqual(link.url, 'https://maps.google.com/xyz')
+
+    def test_whatsapp_normalized_to_digits(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 234 567'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        link = SocialMediaLink.objects.get(business=self.profile, platform='whatsapp')
+        self.assertEqual(link.url, '595981234567')
+
+    def test_duplicate_url_within_platform_rejected(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 234 567'},
+                {'platform': 'whatsapp', 'label': 'Otro', 'url': '595981234567'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_order_assigned_by_index(self):
+        response = self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'Primero', 'url': '+595 981 111 111'},
+                {'platform': 'whatsapp', 'label': 'Segundo', 'url': '+595 981 222 222'},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        links = SocialMediaLink.objects.filter(
+            business=self.profile, platform='whatsapp'
+        ).order_by('order')
+        self.assertEqual([l.label for l in links], ['Primero', 'Segundo'])
+        self.assertEqual([l.order for l in links], [0, 1])
+
+    def test_single_entry_platform_db_constraint(self):
+        from django.db import IntegrityError, transaction
+
+        SocialMediaLink.objects.create(
+            business=self.profile, platform='instagram', url='https://www.instagram.com/a'
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SocialMediaLink.objects.create(
+                    business=self.profile, platform='instagram', url='https://www.instagram.com/b', order=1
+                )
+
+    def test_home_page_returns_label_and_order(self):
+        self.client_.post(self.URL, {
+            'channels': [
+                {'platform': 'whatsapp', 'label': 'Pedidos', 'url': '+595 981 234 567'},
+            ],
+        }, format='json')
+        response = self.client_.get('/api/v1/business/home-page/')
+        self.assertEqual(response.status_code, 200)
+        link = response.data['social_links'][0]
+        self.assertIn('label', link)
+        self.assertIn('order', link)
+        self.assertEqual(link['label'], 'Pedidos')
 
 
 class TestSeedCurrencyNames(TestCase):

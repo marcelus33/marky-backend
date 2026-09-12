@@ -9,14 +9,14 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
+from django.db import transaction, IntegrityError
 
 logger = logging.getLogger(__name__)
 
 from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
 from business.serializers import BusinessCategorySerializer, CurrencySerializer, CitySerializer, CountrySerializer, \
     BusinessProfileWriteSerializer, BusinessProfileListSerializer, BusinessProfileDetailSerializer, SocialMediaLinkSerializer, \
-    SocialMediaLinkBulkUpdateSerializer, SocialMediaLinkBulkUpdateResponseSerializer, BusinessProfileHomePageSerializer, \
+    SocialMediaLinksReplaceSerializer, SocialMediaLinksReplaceResponseSerializer, BusinessProfileHomePageSerializer, \
     BusinessProfileUpdateSerializer, BusinessProfileUpdateResponseSerializer, BranchAttributeSerializer, \
     BusinessProfileImageSerializer
 from rest_framework.permissions import AllowAny
@@ -149,54 +149,41 @@ class SocialMediaLinkViewSet(mixins.RetrieveModelMixin,
 
 @extend_schema(
     tags=['Business'],
-    summary="Bulk update social media links (Atomic)",
+    summary="Replace social media / contact channels (Atomic)",
     description="""
-    Bulk update endpoint for social media links.
-    
-    **Atomic Operation:** All changes are applied together or none at all. If any validation fails, 
-    the entire operation is rolled back and no changes are made.
-    
-    **Behavior:**
-    - Creates new links for platforms that don't exist
-    - Updates existing links for platforms that are present  
-    - Removes links for platforms that are not present in the request
-    
-    **Supported platforms:** facebook, instagram, whatsapp, website
-    
+    Replaces the full set of a business's channels (Instagram, Facebook,
+    TikTok, WhatsApp, Enlaces) in one shot.
+
+    **Atomic, full replacement:** the request must carry every channel the
+    business wants to keep — anything not present is deleted. Up to 3
+    channels may be selected; WhatsApp and Enlaces accept up to 3 named
+    entries each, the rest exactly one.
+
     **Example request:**
     ```json
     {
-        "instagram": "https://www.instagram.com/example",
-        "facebook": "https://www.facebook.com/example", 
-        "whatsapp": "595982590021",
-        "website": "https://www.example.com"
+        "channels": [
+            {"platform": "instagram", "url": "https://www.instagram.com/example"},
+            {"platform": "whatsapp", "label": "Pedidos", "url": "+595 981 234 567"},
+            {"platform": "whatsapp", "label": "Atención al cliente", "url": "+595 982 345 678"},
+            {"platform": "link", "label": "Cómo llegar", "url": "maps.google.com/..."}
+        ]
     }
     ```
     """,
-    request=SocialMediaLinkBulkUpdateSerializer,
+    request=SocialMediaLinksReplaceSerializer,
     responses={
-        200: SocialMediaLinkBulkUpdateResponseSerializer,
-        400: {"description": "Bad request - invalid data, validation error, or missing business profile"}
+        200: SocialMediaLinksReplaceResponseSerializer,
+        400: {"description": "Bad request - invalid data or missing business profile"}
     }
 )
 class SocialMediaLinkBulkUpdateView(APIView):
     """
-    Bulk update endpoint for social media links.
+    Full-replacement endpoint for a business's social/contact channels.
     """
     permission_classes = [IsBusinessOrSuperAdmin]
-    
-    @extend_schema(
-        request=SocialMediaLinkBulkUpdateSerializer,
-        responses={
-            200: SocialMediaLinkBulkUpdateResponseSerializer,
-            400: {"description": "Bad request - invalid data, validation error, or missing business profile"}
-        }
-    )
+
     def post(self, request, *args, **kwargs):
-        """
-        Bulk update social media links for the business.
-        All operations are atomic - if any operation fails, all changes are rolled back.
-        """
         try:
             business_profile = request.user.business_profile
         except BusinessProfile.DoesNotExist:
@@ -204,95 +191,43 @@ class SocialMediaLinkBulkUpdateView(APIView):
                 {"error": "No business profile found for this user."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Validate request data using serializer
-        serializer = SocialMediaLinkBulkUpdateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        validated_data = serializer.validated_data
-        
+
+        serializer = SocialMediaLinksReplaceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        channels = serializer.validated_data['channels']
+
+        order_by_platform = {}
+        new_links = []
+        for entry in channels:
+            platform = entry['platform']
+            order = order_by_platform.get(platform, 0)
+            order_by_platform[platform] = order + 1
+            new_links.append(SocialMediaLink(
+                business=business_profile,
+                platform=platform,
+                label=entry['label'],
+                url=entry['url'],
+                order=order,
+            ))
+
         try:
             with transaction.atomic():
-                # Get current social media links for this business
-                current_links = SocialMediaLink.objects.filter(business=business_profile)
-                current_platforms = {link.platform: link for link in current_links}
-                
-                # Platforms present in the request
-                request_platforms = set(validated_data.keys())
-                
-                # Platforms to remove (present in DB but not in request)
-                platforms_to_remove = set(current_platforms.keys()) - request_platforms
-                
-                # Validate all operations first before making any changes
-                links_to_update = []
-                links_to_create = []
-                
-                for platform, url in validated_data.items():
-                    if platform in current_platforms:
-                        # Prepare update
-                        link = current_platforms[platform]
-                        link.url = url
-                        link.full_clean()  # Validate the model - will raise exception if invalid
-                        links_to_update.append(link)
-                    else:
-                        # Prepare creation - validate first
-                        temp_link = SocialMediaLink(
-                            business=business_profile,
-                            platform=platform,
-                            url=url
-                        )
-                        temp_link.full_clean()  # Validate the model - will raise exception if invalid
-                        links_to_create.append((platform, url))
-                
-                # If we get here, all validations passed, now perform the actual operations
-                
-                # Remove links not present in request
-                removed_count = 0
-                if platforms_to_remove:
-                    removed_count = SocialMediaLink.objects.filter(
-                        business=business_profile,
-                        platform__in=platforms_to_remove
-                    ).delete()[0]
-                
-                # Update existing links
-                updated_links = []
-                for link in links_to_update:
-                    link.save()
-                    updated_links.append(link)
-                
-                # Create new links
-                created_links = []
-                for platform, url in links_to_create:
-                    link = SocialMediaLink.objects.create(
-                        business=business_profile,
-                        platform=platform,
-                        url=url
-                    )
-                    created_links.append(link)
-                
-                # Prepare response
-                response_serializer = SocialMediaLinkSerializer(
-                    updated_links + created_links, 
-                    many=True
-                )
-                
-                response_data = {
-                    "social_links": response_serializer.data,
-                    "created": len(created_links),
-                    "updated": len(updated_links),
-                    "removed": removed_count,
-                    "removed_platforms": list(platforms_to_remove)
-                }
-                
-                return Response(response_data, status=status.HTTP_200_OK)
-                
-        except Exception:
-            logger.exception("Error updating social media links for user %s", request.user.id)
+                business_profile.social_links.all().delete()
+                created_links = SocialMediaLink.objects.bulk_create(new_links)
+        except IntegrityError:
+            logger.exception(
+                "Integrity error replacing social links for user %s", request.user.id
+            )
             return Response(
                 {"error": "Ha ocurrido un error inesperado."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        response_serializer = SocialMediaLinkSerializer(created_links, many=True)
+        return Response(
+            {"social_links": response_serializer.data},
+            status=status.HTTP_200_OK,
+        )
 
 
 @extend_schema(
